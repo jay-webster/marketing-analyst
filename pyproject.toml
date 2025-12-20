@@ -1,0 +1,16 @@
+[project]
+name = "marketing-analyst"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "fastmcp>=2.14.1",
+    "google-genai>=1.56.0",
+    "httpx>=0.28.1",
+    "mcp>=1.25.0",
+    "streamlit>=1.52.2",
+    "trafilatura>=2.0.0",
+    "uvicorn>=0.38.0",
+]
