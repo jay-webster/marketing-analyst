@@ -66,10 +66,24 @@ else:
     # 3. Header (Smaller now)
     st.title("🕵️‍♀️ Marketing Analyst Agent")
 
-    # 4. Display History
-    for message in st.session_state.messages:
+    # 4. Display History (Now with PERSISTENT PDF Buttons!)
+    for i, message in enumerate(st.session_state.messages):
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
+
+            # If this is an assistant message, give it a PDF button
+            if message["role"] == "assistant":
+                # Create a unique key for every button using the index 'i'
+                if st.button("📄 Download PDF", key=f"pdf_{i}"):
+                    pdf_bytes = utils.create_pdf(message["content"])
+                    # We use a trick to trigger the download
+                    st.download_button(
+                        label="Click to Save PDF",
+                        data=pdf_bytes,
+                        file_name=f"strategy_report_{i}.pdf",
+                        mime="application/pdf",
+                        key=f"download_{i}",
+                    )
 
     # 5. Run Logic (If the last message is from User, reply!)
     last_msg = st.session_state.messages[-1]
