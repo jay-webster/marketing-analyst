@@ -1,155 +1,106 @@
 import streamlit as st
 import asyncio
-import os
-from google import genai
-from google.genai import types
-from mcp import ClientSession
-from mcp.client.sse import sse_client
 
-# 🔴 TODO: PASTE  MARKETING BACKEND URL HERE
-# (Make sure it ends with /sse)
-MCP_SERVER_URL = "https://marketing-mcp-4v4sc3n5qq-uc.a.run.app/sse"
-
-PROJECT_ID = os.popen("gcloud config get-value project").read().strip()
-LOCATION = "us-central1"
+# Import our modules
+import utils
+import agent
 
 st.set_page_config(page_title="Marketing Analyst AI", page_icon="🕵️‍♀️", layout="wide")
 
-# --- PASSWORD PROTECTION ---
-def check_password():
-    """Returns `True` if the user had the correct password."""
-    
-    # 1. Check if password is in secrets (Local dev) or env vars (Cloud Run)
-    # We look for "password" in Streamlit secrets
-    if "password" not in st.secrets:
-        st.error("❌ No password set in secrets.toml!")
-        return False
+# 1. Security Check
+if not utils.check_password():
+    st.stop()
 
-    stored_password = st.secrets["password"]
-
-    # 2. Compare with user input
-    def password_entered():
-        if st.session_state["password"] == stored_password:
-            st.session_state["password_correct"] = True
-            del st.session_state["password"]  # clear input field
-        else:
-            st.session_state["password_correct"] = False
-
-    if st.session_state.get("password_correct", False):
-        return True
-
-    st.text_input(
-        "Please enter the access password", 
-        type="password", 
-        on_change=password_entered, 
-        key="password"
-    )
-    return False
-
-if not check_password():
-    st.stop()  # Stop execution if password is wrong
-# ---------------------------
-
-st.title("🕵️‍♀️ Marketing Analyst Agent")
-st.markdown("""
-**I read websites so you don't have to.** Give me a URL, and I will analyze the value proposition, target audience, and competitive positioning.
-""")
-
-# Initialize Chat
+# 2. Chat History Setup
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display Chat History
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
 
-async def run_agent_turn(user_prompt):
-    """Connects to the backend and runs the agent."""
-    # We add timeout=300 (5 minutes) to prevent disconnection during long tasks
-    async with sse_client(MCP_SERVER_URL, timeout=300) as streams:
-        async with ClientSession(streams[0], streams[1]) as session:
-            await session.initialize()
-            
-            # Get Tools
-            tools_list = await session.list_tools()
-            gemini_tools = [{"name": t.name, "description": t.description, "parameters": t.inputSchema} for t in tools_list.tools]
+# --- THE "GOOGLE" CENTER LAYOUT LOGIC ---
+def handle_search():
+    """Callback to move center-search text into chat history"""
+    user_input = st.session_state.center_search
+    if user_input:
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        # Clear the input
+        st.session_state.center_search = ""
 
-            # Setup Gemini
-            client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
-            chat = client.chats.create(
-                model="gemini-2.0-flash",
-                config=types.GenerateContentConfig(
-                    system_instruction="""
-                    You are a Senior Marketing Strategist.
-                    YOUR CAPABILITIES:
-                    1. You can visit any URL using the 'analyze_website' tool.
-                    2. You extract key insights: Value Prop, Target Audience, Tone of Voice.
-                    RULES:
-                    - ALWAYS usage 'analyze_website' when the user provides a URL.
-                    - Do NOT hallucinate content. If the tool fails, say so.
-                    - Format your output with clear headers (##) and bullet points.
-                    """,
-                    tools=[types.Tool(function_declarations=gemini_tools)]
+
+# If history is empty, show the "Google Style" Landing Page
+if not st.session_state.messages:
+
+    # SPACER 1: Push the Title down from the top of the browser
+    st.markdown("<br><br>", unsafe_allow_html=True)
+
+    # Title & Subtitle
+    st.markdown(
+        "<h1 style='text-align: center;'>🕵️‍♀️ Marketing Analyst Agent</h1>",
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        "<h5 style='text-align: center;'><i>I read websites so you don't have to.</i></h5>",
+        unsafe_allow_html=True,
+    )
+
+    # SPACER 2: Push the Search Box away from the Title
+    st.markdown("<br><br><br>", unsafe_allow_html=True)
+
+    # Centered Search Box using Columns
+    col1, col2, col3 = st.columns([1, 2, 1])
+    with col2:
+        st.text_input(
+            "Enter a URL to analyze:",
+            key="center_search",
+            on_change=handle_search,
+            placeholder="e.g. pulsarplatform.com",
+            label_visibility="collapsed",  # Hides the tiny label for a cleaner look
+        )
+        # Center the caption too
+        st.markdown(
+            "<p style='text-align: center; color: grey;'>Press Enter to start analysis</p>",
+            unsafe_allow_html=True,
+        )
+
+# --- THE "CHAT" INTERFACE LOGIC ---
+else:
+    # 3. Header (Smaller now)
+    st.title("🕵️‍♀️ Marketing Analyst Agent")
+
+    # 4. Display History
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+
+    # 5. Run Logic (If the last message is from User, reply!)
+    last_msg = st.session_state.messages[-1]
+    if last_msg["role"] == "user":
+        with st.chat_message("assistant"):
+            try:
+                # Run the agent using the last message content
+                response_text = asyncio.run(
+                    agent.run_agent_turn(last_msg["content"], st.session_state.messages)
                 )
-            )
 
-            # Send User Message
-            response = chat.send_message(user_prompt)
+                st.markdown(response_text)
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": response_text}
+                )
 
-            # Handle Tool Calls (Loop until model stops calling tools)
-            while True:
-                # 1. Identify all function calls in the current response
-                # Gemini might send text + tool calls, or multiple tool calls
-                call_parts = [p for p in response.candidates[0].content.parts if p.function_call]
-                
-                # If no function calls, we are done with the loop
-                if not call_parts:
-                    break 
+                # PDF Export
+                if response_text:
+                    st.markdown("---")
+                    pdf_bytes = utils.create_pdf(response_text)
+                    st.download_button(
+                        "📄 Download Strategy PDF",
+                        pdf_bytes,
+                        "marketing_strategy.pdf",
+                        "application/pdf",
+                    )
 
-                # 2. Execute ALL tools in this turn
-                function_responses = []
-                
-                # Create a status container to show progress
-                with st.status(f"🕵️‍♀️ Agent is working...", expanded=True) as status:
-                    
-                    for part in call_parts:
-                        fn = part.function_call
-                        st.write(f"Executing: {fn.name}")
-                        
-                        # Call the MCP server
-                        try:
-                            result = await session.call_tool(fn.name, arguments=fn.args)
-                            tool_output = result.content[0].text
-                        except Exception as e:
-                            tool_output = f"Error executing tool: {str(e)}"
+            except Exception as e:
+                st.error(f"An error occurred: {e}")
 
-                        # Add to the batch of responses
-                        function_responses.append(
-                            types.Part.from_function_response(
-                                name=fn.name, 
-                                response={"result": tool_output}
-                            )
-                        )
-                    
-                    status.update(label="✅ Tools Completed", state="complete", expanded=False)
-
-                # 3. Send ALL results back to Gemini at once
-                # This fixes the "400" error by ensuring request/response counts match
-                response = chat.send_message(function_responses)
-
-            return response.text
-
-# Chat Input
-if prompt := st.chat_input("Check out pulsarplatform.com"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.markdown(prompt)
-
-    with st.chat_message("assistant"):
-        if "REPLACE_ME" in MCP_SERVER_URL:
-            st.error("❌ You forgot to update the MCP_SERVER_URL in app.py!")
-        else:
-            response_text = asyncio.run(run_agent_turn(prompt))
-            st.markdown(response_text)
-            st.session_state.messages.append({"role": "assistant", "content": response_text})
+    # 6. Bottom Chat Input (For follow-up questions)
+    if prompt := st.chat_input("Ask a follow-up question..."):
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        st.rerun()  # Force reload to trigger the logic above

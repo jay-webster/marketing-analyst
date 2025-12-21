@@ -1,0 +1,6 @@
+[theme]
+primaryColor = "#00d4ff"      # Cyan/Electric Blue (High contrast against Navy)
+backgroundColor = "#0b192e"   # Deep "Midnight" Navy (Not black, but very dark blue)
+secondaryBackgroundColor = "#060d17" # Almost black-blue for the sidebar
+textColor = "#e6f1ff"         # Soft White (easier on eyes than pure white)
+font = "sans serif"
