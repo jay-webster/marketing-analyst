@@ -1,3 +1,4 @@
+import os
 from email.header import Header
 import streamlit as st
 import smtplib
@@ -30,12 +31,33 @@ def check_password():
 
 
 def get_secrets():
-    """Helper to load secrets locally without Streamlit running."""
+    """
+    Hybrid Secret Loader:
+    1. Tries to load from local .streamlit/secrets.toml (Laptop Mode)
+    2. If missing, looks for Environment Variables (Cloud Mode)
+    """
+    secrets = {}
+
+    # Attempt 1: Local File
     try:
         with open(".streamlit/secrets.toml", "rb") as f:
-            return tomllib.load(f)
+            secrets = tomllib.load(f)
     except FileNotFoundError:
-        return {}
+        pass  # We are likely in the cloud
+
+    # Attempt 2: Environment Variables (Override local if present)
+    # We reconstruct the dictionary structure that the app expects
+    if "email" not in secrets:
+        secrets["email"] = {}
+
+    if os.getenv("EMAIL_SENDER"):
+        secrets["email"]["sender"] = os.getenv("EMAIL_SENDER")
+    if os.getenv("EMAIL_PASSWORD"):
+        secrets["email"]["password"] = os.getenv("EMAIL_PASSWORD")
+    if os.getenv("EMAIL_RECIPIENT"):
+        secrets["email"]["recipient"] = os.getenv("EMAIL_RECIPIENT")
+
+    return secrets
 
 
 # --- PDF GENERATION ---
