@@ -2,23 +2,28 @@ import streamlit as st
 import smtplib
 import os
 import tomllib
+import json
+import requests
 from datetime import datetime
 from fpdf import FPDF
 from email.header import Header
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
+from google.cloud import storage
+
+# --- CONFIGURATION ---
+BUCKET_NAME = "marketing-brain-v1"
+MEMORY_FILE = "competitor_memory.json"
+COMPETITOR_FILE = "competitors.json"
 
 
 # --- SECURITY ---
 def check_password():
-    """Returns True if the user is logged in."""
     if "password_correct" not in st.session_state:
         st.session_state.password_correct = False
-
     if st.session_state.password_correct:
         return True
-
     with st.form("login_form"):
         password = st.text_input("Enter Password", type="password")
         if st.form_submit_button("Login"):
@@ -31,17 +36,14 @@ def check_password():
 
 
 def get_secrets():
-    """Hybrid Secret Loader (Local + Cloud)."""
     secrets = {}
     try:
         with open(".streamlit/secrets.toml", "rb") as f:
             secrets = tomllib.load(f)
     except FileNotFoundError:
         pass
-
     if "email" not in secrets:
         secrets["email"] = {}
-
     if os.getenv("EMAIL_SENDER"):
         secrets["email"]["sender"] = os.getenv("EMAIL_SENDER")
     if os.getenv("EMAIL_PASSWORD"):
@@ -49,10 +51,112 @@ def get_secrets():
     if os.getenv("EMAIL_RECIPIENT"):
         secrets["email"]["recipient"] = os.getenv("EMAIL_RECIPIENT")
 
+    # Slack Secrets (Updated for Bot Token)
+    if "slack" not in secrets:
+        secrets["slack"] = {}
+    if os.getenv("SLACK_BOT_TOKEN"):
+        secrets["slack"]["bot_token"] = os.getenv("SLACK_BOT_TOKEN")
+    if os.getenv("SLACK_CHANNEL_ID"):
+        secrets["slack"]["channel_id"] = os.getenv("SLACK_CHANNEL_ID")
+
     return secrets
 
 
-# --- PDF GENERATION (PROFESSIONAL UPGRADE) ---
+# --- PERSISTENCE ---
+def load_memory():
+    try:
+        client = storage.Client()
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(MEMORY_FILE)
+        if blob.exists():
+            return json.loads(blob.download_as_text())
+        else:
+            return {}
+    except Exception as e:
+        print(f"⚠️ Memory Load Failed: {e}")
+        return {}
+
+
+def save_memory(memory_dict):
+    try:
+        client = storage.Client()
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(MEMORY_FILE)
+        blob.upload_from_string(json.dumps(memory_dict, indent=2))
+        print("💾 Memory saved.")
+    except Exception as e:
+        print(f"❌ Memory Save Failed: {e}")
+
+
+def get_competitors():
+    default_list = ["navistone.com", "pebblepost.com", "lob.com", "postie.com"]
+    try:
+        client = storage.Client()
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(COMPETITOR_FILE)
+        if blob.exists():
+            data = json.loads(blob.download_as_text())
+            return data.get("competitors", default_list)
+        else:
+            save_competitors(default_list)
+            return default_list
+    except Exception as e:
+        print(f"⚠️ Competitor Load Failed: {e}")
+        return default_list
+
+
+def save_competitors(competitor_list):
+    try:
+        client = storage.Client()
+        bucket = client.bucket(BUCKET_NAME)
+        blob = bucket.blob(COMPETITOR_FILE)
+        data = {"competitors": competitor_list, "updated_at": str(datetime.now())}
+        blob.upload_from_string(json.dumps(data, indent=2))
+        return True
+    except Exception as e:
+        print(f"❌ Failed to save competitors: {e}")
+        return False
+
+
+# --- SLACK FILE UPLOAD (NEW) ---
+def send_slack_file(pdf_bytes, filename, summary_text):
+    """Uploads the PDF to Slack with a summary message."""
+    secrets = get_secrets()
+    slack_conf = secrets.get("slack", {})
+
+    if "bot_token" not in slack_conf or "channel_id" not in slack_conf:
+        print("⚠️ Missing Slack Bot Token or Channel ID. Skipping.")
+        return
+
+    token = slack_conf["bot_token"]
+    channel_id = slack_conf["channel_id"]
+
+    print(f"📤 Uploading {filename} to Slack Channel {channel_id}...")
+
+    try:
+        # We use the files.upload API to send the PDF + The Comment in one go
+        response = requests.post(
+            "https://slack.com/api/files.upload",
+            headers={"Authorization": f"Bearer {token}"},
+            files={"file": pdf_bytes},
+            data={
+                "channels": channel_id,
+                "initial_comment": summary_text,
+                "title": filename,
+                "filetype": "pdf",
+            },
+        )
+
+        if response.status_code == 200 and response.json().get("ok"):
+            print("✅ Slack file upload successful.")
+        else:
+            print(f"❌ Slack Upload Failed: {response.text}")
+
+    except Exception as e:
+        print(f"❌ Slack Error: {e}")
+
+
+# --- PDF GENERATION ---
 class ReportPDF(FPDF):
     def header(self):
         self.set_font("Arial", "I", 9)
@@ -68,10 +172,9 @@ class ReportPDF(FPDF):
 
 
 def create_pdf(text):
-    """Parses Markdown text and applies indented, clean styling."""
     pdf = ReportPDF()
     pdf.add_page()
-    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.set_auto_page_break(auto=True, margin=20)
 
     lines = text.split("\n")
 
@@ -83,13 +186,12 @@ def create_pdf(text):
             pdf.ln(2)
             continue
 
-        # --- STYLING RULES ---
-
-        # TITLE (Single #)
         if safe_line.startswith("# "):
             text_content = safe_line.replace("#", "").strip()
+            if pdf.page_no() > 1 or pdf.get_y() > 50:
+                pdf.add_page()
             pdf.set_font("Arial", "B", 18)
-            pdf.set_text_color(0, 51, 102)  # Navy Blue
+            pdf.set_text_color(0, 51, 102)
             pdf.ln(8)
             pdf.cell(0, 10, text_content, 0, 1, "L")
             y = pdf.get_y()
@@ -97,9 +199,7 @@ def create_pdf(text):
             pdf.line(10, y, 200, y)
             pdf.ln(5)
 
-        # HEADER 2 (##)
         elif safe_line.startswith("## "):
-            # Clean both '#' and potential '*' if the model mixed them
             text_content = safe_line.replace("#", "").replace("*", "").strip()
             pdf.set_font("Arial", "B", 14)
             pdf.set_text_color(0, 76, 153)
@@ -107,7 +207,6 @@ def create_pdf(text):
             pdf.cell(0, 8, text_content, 0, 1, "L")
             pdf.ln(2)
 
-        # HEADER 3 (###)
         elif safe_line.startswith("### "):
             text_content = safe_line.replace("#", "").replace("*", "").strip()
             pdf.set_font("Arial", "B", 12)
@@ -115,29 +214,20 @@ def create_pdf(text):
             pdf.ln(3)
             pdf.cell(0, 6, text_content, 0, 1, "L")
 
-        # BULLETS (* or -) -> NOW INDENTED
         elif safe_line.startswith("* ") or safe_line.startswith("- "):
             bullet_text = safe_line[2:].strip()
-
             if bullet_text.startswith("**"):
                 pdf.set_font("Arial", "B", 11)
             else:
                 pdf.set_font("Arial", "", 11)
-
             pdf.set_text_color(0, 0, 0)
-
-            # Indent Logic:
-            # Bullet sits at 15mm (was 10)
-            # Text sits at 20mm (was 15)
             current_y = pdf.get_y()
             pdf.set_xy(15, current_y)
             pdf.cell(5, 6, chr(149), 0, 0)
-
             pdf.set_xy(20, current_y)
             pdf.multi_cell(0, 6, bullet_text.replace("**", ""))
             pdf.ln(1)
 
-        # STANDARD TEXT
         else:
             pdf.set_font("Arial", "", 11)
             pdf.set_text_color(0, 0, 0)
@@ -146,11 +236,9 @@ def create_pdf(text):
     return pdf.output(dest="S").encode("latin-1")
 
 
-# --- EMAIL SENDER (GHOST PROOF) ---
+# --- EMAIL SENDER ---
 def send_email(pdf_bytes, filename, subject="Daily Strategy Brief"):
-    """Sends the PDF via Gmail (Ghost-Proof Version)."""
     secrets = get_secrets()
-
     if "email" not in secrets:
         print("❌ Error: No email credentials found.")
         return
@@ -163,15 +251,12 @@ def send_email(pdf_bytes, filename, subject="Daily Strategy Brief"):
     msg["From"] = sender
     msg["To"] = recipient
 
-    # CLEAN SUBJECT
     safe_subject = subject.encode("ascii", "ignore").decode("ascii")
     msg["Subject"] = safe_subject
 
-    # BODY
     body = "Attached is the latest" + " " + "automated strategy report."
     msg.attach(MIMEText(body, "plain", "utf-8"))
 
-    # CLEAN ATTACHMENT
     safe_filename = filename.encode("ascii", "ignore").decode("ascii")
     part = MIMEApplication(pdf_bytes, Name=safe_filename)
     part["Content-Disposition"] = f'attachment; filename="{safe_filename}"'

@@ -3,3 +3,6 @@ google-genai
 mcp
 asyncio
 fpdf
+google-cloud-storage
+requests
+slack-sdk

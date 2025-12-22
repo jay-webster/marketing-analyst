@@ -1,120 +1,145 @@
 import streamlit as st
 import asyncio
-
-# Import our modules
-import utils
 import agent
+import utils
 
-st.set_page_config(page_title="Marketing Analyst AI", page_icon="🕵️‍♀️", layout="wide")
+st.set_page_config(page_title="Market Intelligence Agent", layout="wide")
 
-# 1. Security Check
+# --- AUTHENTICATION ---
 if not utils.check_password():
     st.stop()
 
-# 2. Chat History Setup
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# --- HEADER ---
+st.title("🕵️‍♀️ Market Intelligence Agent")
+st.markdown("---")
 
+# --- TABS ---
+tab1, tab2 = st.tabs(["🔎 Research Analyst", "⚙️ Manage Robot"])
 
-# --- THE "GOOGLE" CENTER LAYOUT LOGIC ---
-def handle_search():
-    """Callback to move center-search text into chat history"""
-    user_input = st.session_state.center_search
-    if user_input:
-        st.session_state.messages.append({"role": "user", "content": user_input})
-        # Clear the input
-        st.session_state.center_search = ""
+# ==========================================
+# TAB 1: MANUAL RESEARCH (Original App)
+# ==========================================
+with tab1:
+    st.header("Ad-Hoc Competitor Analysis")
 
-
-# If history is empty, show the "Google Style" Landing Page
-if not st.session_state.messages:
-
-    # SPACER 1: Push the Title down from the top of the browser
-    st.markdown("<br><br>", unsafe_allow_html=True)
-
-    # Title & Subtitle
-    st.markdown(
-        "<h1 style='text-align: center;'>🕵️‍♀️ Marketing Analyst Agent</h1>",
-        unsafe_allow_html=True,
-    )
-    st.markdown(
-        "<h5 style='text-align: center;'><i>I read websites so you don't have to.</i></h5>",
-        unsafe_allow_html=True,
-    )
-
-    # SPACER 2: Push the Search Box away from the Title
-    st.markdown("<br><br><br>", unsafe_allow_html=True)
-
-    # Centered Search Box using Columns
-    col1, col2, col3 = st.columns([1, 2, 1])
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        target_url = st.text_input("Enter Competitor URL", placeholder="example.com")
     with col2:
-        st.text_input(
-            "Enter a URL to analyze:",
-            key="center_search",
-            on_change=handle_search,
-            placeholder="e.g. pulsarplatform.com",
-            label_visibility="collapsed",  # Hides the tiny label for a cleaner look
-        )
-        # Center the caption too
-        st.markdown(
-            "<p style='text-align: center; color: grey;'>Press Enter to start analysis</p>",
-            unsafe_allow_html=True,
-        )
+        analyze_btn = st.button("Analyze Site", type="primary")
 
-# --- THE "CHAT" INTERFACE LOGIC ---
-else:
-    # 3. Header (Smaller now)
-    st.title("🕵️‍♀️ Marketing Analyst Agent")
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
 
-    # 4. Display History (Now with PERSISTENT PDF Buttons!)
-    for i, message in enumerate(st.session_state.messages):
+    if analyze_btn and target_url:
+        with st.status("🤖 AI Agent Working...", expanded=True) as status:
+            st.write("🌐 Accessing website...")
+            initial_prompt = f"Analyze {target_url}. Provide a strategic summary of their homepage value proposition."
+
+            try:
+                response = asyncio.run(
+                    agent.run_agent_turn(initial_prompt, st.session_state.chat_history)
+                )
+                st.session_state.chat_history.append(
+                    {"role": "user", "content": initial_prompt}
+                )
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": response}
+                )
+                status.update(
+                    label="✅ Analysis Complete!", state="complete", expanded=False
+                )
+            except Exception as e:
+                st.error(f"Error: {e}")
+                status.update(label="❌ Failed", state="error")
+
+    # Display Chat
+    for message in st.session_state.chat_history:
         with st.chat_message(message["role"]):
             st.markdown(message["content"])
 
-            # If this is an assistant message, give it a PDF button
-            if message["role"] == "assistant":
-                # Create a unique key for every button using the index 'i'
-                if st.button("📄 Download PDF", key=f"pdf_{i}"):
-                    pdf_bytes = utils.create_pdf(message["content"])
-                    # We use a trick to trigger the download
-                    st.download_button(
-                        label="Click to Save PDF",
-                        data=pdf_bytes,
-                        file_name=f"strategy_report_{i}.pdf",
-                        mime="application/pdf",
-                        key=f"download_{i}",
-                    )
+    # Follow-up Input
+    if st.session_state.chat_history:
+        user_input = st.chat_input("Ask a follow-up question...")
+        if user_input:
+            with st.chat_message("user"):
+                st.markdown(user_input)
+            st.session_state.chat_history.append(
+                {"role": "user", "content": user_input}
+            )
 
-    # 5. Run Logic (If the last message is from User, reply!)
-    last_msg = st.session_state.messages[-1]
-    if last_msg["role"] == "user":
-        with st.chat_message("assistant"):
-            try:
-                # Run the agent using the last message content
-                response_text = asyncio.run(
-                    agent.run_agent_turn(last_msg["content"], st.session_state.messages)
+            with st.spinner("Thinking..."):
+                response = asyncio.run(
+                    agent.run_agent_turn(user_input, st.session_state.chat_history)
+                )
+                with st.chat_message("assistant"):
+                    st.markdown(response)
+                st.session_state.chat_history.append(
+                    {"role": "assistant", "content": response}
                 )
 
-                st.markdown(response_text)
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": response_text}
+            # PDF Download Button
+            full_text = "\n\n".join(
+                [
+                    f"**{m['role'].upper()}**: {m['content']}"
+                    for m in st.session_state.chat_history
+                ]
+            )
+            pdf_bytes = utils.create_pdf(full_text)
+            st.download_button(
+                "📄 Download Report as PDF",
+                data=pdf_bytes,
+                file_name="research_report.pdf",
+                mime="application/pdf",
+            )
+
+# ==========================================
+# TAB 2: ROBOT MANAGER (New Feature)
+# ==========================================
+with tab2:
+    st.header("⚙️ Daily Monitor Settings")
+    st.info("Manage the list of competitors the Cloud Robot watches every morning.")
+
+    # Load current list from Cloud
+    current_competitors = utils.get_competitors()
+
+    # Layout: List on left, Add form on right
+    col_list, col_add = st.columns([2, 1])
+
+    with col_list:
+        st.subheader(f"Current Watchlist ({len(current_competitors)})")
+
+        # Display as a clean table with delete buttons
+        for comp in current_competitors:
+            c1, c2 = st.columns([4, 1])
+            c1.markdown(f"**{comp}**")
+            if c2.button("🗑️", key=f"del_{comp}", help=f"Remove {comp}"):
+                new_list = [x for x in current_competitors if x != comp]
+                if utils.save_competitors(new_list):
+                    st.success(f"Removed {comp}")
+                    st.rerun()
+                else:
+                    st.error("Failed to save changes.")
+
+    with col_add:
+        st.subheader("Add New Target")
+        with st.form("add_comp_form"):
+            new_comp = st.text_input("Domain (e.g. competitors.com)")
+            submitted = st.form_submit_button("Add to Watchlist")
+
+            if submitted and new_comp:
+                clean_comp = (
+                    new_comp.replace("https://", "")
+                    .replace("http://", "")
+                    .replace("www.", "")
+                    .strip()
                 )
-
-                # PDF Export
-                if response_text:
-                    st.markdown("---")
-                    pdf_bytes = utils.create_pdf(response_text)
-                    st.download_button(
-                        "📄 Download Strategy PDF",
-                        pdf_bytes,
-                        "marketing_strategy.pdf",
-                        "application/pdf",
-                    )
-
-            except Exception as e:
-                st.error(f"An error occurred: {e}")
-
-    # 6. Bottom Chat Input (For follow-up questions)
-    if prompt := st.chat_input("Ask a follow-up question..."):
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        st.rerun()  # Force reload to trigger the logic above
+                if clean_comp in current_competitors:
+                    st.warning("Already in the list!")
+                else:
+                    current_competitors.append(clean_comp)
+                    if utils.save_competitors(current_competitors):
+                        st.success(f"Added {clean_comp}")
+                        st.rerun()
+                    else:
+                        st.error("Failed to save to Cloud.")
