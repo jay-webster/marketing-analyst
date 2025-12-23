@@ -171,6 +171,14 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                     import json
 
                     try:
+                        # Safety check for empty text
+                        if (
+                            not response
+                            or not hasattr(response, "text")
+                            or not response.text
+                        ):
+                            raise ValueError("Response text is empty/None")
+
                         clean_text = (
                             response.text.strip()
                             .replace("```json", "")
@@ -180,10 +188,16 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                         data = json.loads(clean_text)
                         return CompetitorAnalysis(**data)
                     except Exception as e:
+                        # Log the raw text only if it exists
+                        raw_text = (
+                            response.text
+                            if response and hasattr(response, "text")
+                            else "None"
+                        )
                         print(
                             f"⚠️ Warning: Model returned None & JSON parsing failed. Error: {e}"
                         )
-                        print(f"RAW RESPONSE: {response.text}")
+                        print(f"RAW RESPONSE: {raw_text}")
                         # Return a fallback object so monitor.py doesn't crash
                         return CompetitorAnalysis(
                             name="Unknown (Analysis Failed)",
