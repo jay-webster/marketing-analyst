@@ -5,7 +5,9 @@ from datetime import datetime
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
+from email.mime.application import MIMEApplication
 from google.cloud import storage
+from google.cloud import firestore
 from fpdf import FPDF
 
 # --- CONFIGURATION ---
@@ -69,31 +71,50 @@ def save_memory(memory_dict):
 
 
 def get_competitors():
-    default_list = ["navistone.com", "pebblepost.com", "lob.com", "postie.com"]
+    """Fetches the list of competitors from Firestore."""
     try:
-        client = storage.Client()
-        bucket = client.bucket(BUCKET_NAME)
-        blob = bucket.blob(COMPETITOR_FILE)
-        if blob.exists():
-            data = json.loads(blob.download_as_text())
-            return data.get("competitors", default_list)
-        return default_list
+        db = firestore.Client()
+        docs = db.collection("competitors").stream()
+        competitors = [doc.id for doc in docs]
+
+        # Fallback if empty (first run)
+        if not competitors:
+            return ["navistone.com", "pebblepost.com", "lob.com", "postie.com"]
+        return competitors
     except Exception as e:
-        print(f"⚠️ Warning: Could not load competitors from GCS, using defaults. ({e})")
-        return default_list
+        print(f"⚠️ Warning: Could not load competitors from Firestore: {e}")
+        return ["navistone.com", "pebblepost.com", "lob.com", "postie.com"]
 
 
 def save_competitors(competitors_list):
-    """Saves the list of competitors to GCS."""
+    """Syncs the list of competitors to Firestore."""
     try:
-        client = storage.Client()
-        bucket = client.bucket(BUCKET_NAME)
-        blob = bucket.blob(COMPETITOR_FILE)
-        # We wrap it in a dict to be extensible later
-        blob.upload_from_string(json.dumps({"competitors": competitors_list}, indent=2))
+        db = firestore.Client()
+        collection_ref = db.collection("competitors")
+
+        # 1. Get current list to find diffs
+        existing_docs = [doc.id for doc in collection_ref.stream()]
+        existing_set = set(existing_docs)
+        new_set = set(competitors_list)
+
+        batch = db.batch()
+
+        # 2. Add New
+        for domain in new_set - existing_set:
+            doc_ref = collection_ref.document(domain)
+            batch.set(
+                doc_ref, {"domain": domain, "added_at": firestore.SERVER_TIMESTAMP}
+            )
+
+        # 3. Delete Removed
+        for domain in existing_set - new_set:
+            doc_ref = collection_ref.document(domain)
+            batch.delete(doc_ref)
+
+        batch.commit()
         return True
     except Exception as e:
-        print(f"❌ Error saving competitors to GCS: {e}")
+        print(f"❌ Error saving competitors to Firestore: {e}")
         return False
 
 
