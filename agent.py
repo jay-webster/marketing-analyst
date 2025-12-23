@@ -154,20 +154,37 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                 print(f"⚠️ Warning: Agent reached max iterations ({max_iterations})")
 
             # --- RETURN LOGIC ---
+            # --- RETURN LOGIC ---
             if headless:
                 # Return the structured object (Pydantic)
                 if response.parsed:
                     return response.parsed
                 else:
-                    print(f"⚠️ Warning: Model returned None for structured output.")
-                    # Return a fallback object so monitor.py doesn't crash
-                    return CompetitorAnalysis(
-                        name="Unknown (Analysis Failed)",
-                        value_proposition="Could not extract data.",
-                        solutions="N/A",
-                        industries="N/A",
-                        has_changes=False,
-                    )
+                    # Attempt manual JSON extraction (Fallback for when SDK parsing fails)
+                    import json
+
+                    try:
+                        clean_text = (
+                            response.text.strip()
+                            .replace("```json", "")
+                            .replace("```", "")
+                            .strip()
+                        )
+                        data = json.loads(clean_text)
+                        return CompetitorAnalysis(**data)
+                    except Exception as e:
+                        print(
+                            f"⚠️ Warning: Model returned None & JSON parsing failed. Error: {e}"
+                        )
+                        print(f"RAW RESPONSE: {response.text}")
+                        # Return a fallback object so monitor.py doesn't crash
+                        return CompetitorAnalysis(
+                            name="Unknown (Analysis Failed)",
+                            value_proposition="Could not extract data.",
+                            solutions="N/A",
+                            industries="N/A",
+                            has_changes=False,
+                        )
             else:
                 # Return the standard text string
                 return response.text
