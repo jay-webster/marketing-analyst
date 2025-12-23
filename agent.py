@@ -180,6 +180,7 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                 else:
                     # Attempt manual JSON extraction (Fallback for when SDK parsing fails)
                     import json
+                    import re
 
                     try:
                         # Safety check for empty text
@@ -190,12 +191,21 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                         ):
                             raise ValueError("Response text is empty/None")
 
-                        clean_text = (
-                            response.text.strip()
-                            .replace("```json", "")
-                            .replace("```", "")
-                            .strip()
-                        )
+                        # Use Regex to find the JSON object (first '{' to last '}')
+                        text_to_parse = response.text
+                        json_match = re.search(r"\{.*\}", text_to_parse, re.DOTALL)
+
+                        if json_match:
+                            clean_text = json_match.group(0)
+                        else:
+                            # Fallback to simple cleanup if regex fails
+                            clean_text = (
+                                text_to_parse.strip()
+                                .replace("```json", "")
+                                .replace("```", "")
+                                .strip()
+                            )
+
                         data = json.loads(clean_text)
                         return CompetitorAnalysis(**data)
                     except Exception as e:
@@ -208,11 +218,11 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                         print(
                             f"⚠️ Warning: Model returned None & JSON parsing failed. Error: {e}"
                         )
-                        print(f"RAW RESPONSE: {raw_text}")
-                        # Return a fallback object so monitor.py doesn't crash
+                        print(f"DEBUG: Raw Failed Response: {raw_text}")
+
                         return CompetitorAnalysis(
                             name="Unknown (Analysis Failed)",
-                            value_proposition="Could not extract data.",
+                            value_proposition="The model failed to return a valid JSON response.",
                             solutions="N/A",
                             industries="N/A",
                             has_changes=False,
