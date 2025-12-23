@@ -98,6 +98,13 @@ def show_admin_dashboard():
     st.info("Manage the list of competitors the Cloud Robot watches every morning.")
 
     current_competitors = utils.get_competitors()
+
+    # Ensure navistone.com is always present
+    if "navistone.com" not in current_competitors:
+        current_competitors.insert(0, "navistone.com")
+        utils.save_competitors(current_competitors)
+        st.rerun()
+
     col_list, col_add = st.columns([2, 1])
 
     with col_list:
@@ -105,14 +112,25 @@ def show_admin_dashboard():
         for comp in current_competitors:
             c1, c2 = st.columns([4, 1])
             c1.text(comp)
-            if c2.button("🗑️", key=f"del_{comp}"):
-                new_list = [x for x in current_competitors if x != comp]
-                utils.save_competitors(new_list)
-                st.rerun()
+
+            # Prevent deleting the default domain
+            if comp == "navistone.com":
+                c2.button(
+                    "🔒",
+                    key="lock_ns",
+                    disabled=True,
+                    help="Default domain cannot be removed.",
+                )
+            else:
+                if c2.button("🗑️", key=f"del_{comp}"):
+                    new_list = [x for x in current_competitors if x != comp]
+                    utils.save_competitors(new_list)
+                    st.rerun()
 
     with col_add:
         st.write("**Add Target**")
-        with st.form("add_comp_form"):
+        # clear_on_submit=True resets the text input after logic runs
+        with st.form("add_comp_form", clear_on_submit=True):
             new_comp = st.text_input("Domain")
             if st.form_submit_button("Add"):
                 clean_comp = (
