@@ -144,6 +144,8 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                         print(f"Executing (Silent): {fn.name}")
                         tool_output = await execute_tool(session, fn, headless)
                         print(f"DEBUG: Tool Output Length: {len(tool_output)}")
+                        if len(tool_output) < 200:
+                            print(f"DEBUG: Short Tool Output: {tool_output}")
                         function_responses.append(
                             types.Part.from_function_response(
                                 name=fn.name, response={"result": tool_output}
@@ -219,6 +221,20 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                             f"⚠️ Warning: Model returned None & JSON parsing failed. Error: {e}"
                         )
                         print(f"DEBUG: Raw Failed Response: {raw_text}")
+
+                        # Check if the model was being stubborn and returning a function call instead of text
+                        if (
+                            response
+                            and response.candidates
+                            and response.candidates[0].content.parts
+                        ):
+                            if any(
+                                p.function_call
+                                for p in response.candidates[0].content.parts
+                            ):
+                                print(
+                                    "DEBUG: Model returned a function call content, not text/JSON."
+                                )
 
                         return CompetitorAnalysis(
                             name="Unknown (Analysis Failed)",
