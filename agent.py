@@ -153,8 +153,23 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                 # Send tool outputs back to model
                 response = chat.send_message(function_responses)
 
-            if iterations >= max_iterations:
-                print(f"⚠️ Warning: Agent reached max iterations ({max_iterations})")
+                # HEADLESS FIX: Detect unnecessary looping
+                # If we've already run the tool once, and the model wants to run it again,
+                # we intervene and force it to just output the JSON.
+                if headless and iterations >= 1:
+                    has_tool_calls = any(
+                        p.function_call for p in response.candidates[0].content.parts
+                    )
+                    if has_tool_calls:
+                        print(
+                            "⚠️ Alert: Agent tried to loop tool calls. Forcing JSON generation."
+                        )
+                        response = chat.send_message(
+                            "You have already analyzed the website. Do not run tools again. "
+                            "Output the JSON analysis immediately."
+                        )
+                        # We break here because we have the final 'response' from the forced message
+                        break
 
             # --- RETURN LOGIC ---
             # --- RETURN LOGIC ---
