@@ -1,4 +1,5 @@
 import streamlit as st
+import os
 from google.cloud import firestore
 import uuid
 import re
@@ -35,14 +36,19 @@ def show_login():
         return
 
     # Check Password Logic
-    if "password" not in st.secrets:
+    try:
+        stored_password = st.secrets.get("password")
+    except Exception:
+        stored_password = os.environ.get("ADMIN_PASSWORD")
+
+    if not stored_password:
         st.warning("⚠️ No password set. Access is open.")
         show_admin_dashboard()
         return
 
     password = st.text_input("Enter Password", type="password")
     if st.button("Login"):
-        if password == st.secrets["password"]:
+        if password == stored_password:
             st.session_state["password_correct"] = True
             st.rerun()
         else:

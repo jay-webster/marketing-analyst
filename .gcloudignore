@@ -1,0 +1,9 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# Explicitly allow secrets for Cloud Run
+! .streamlit/secrets.toml
