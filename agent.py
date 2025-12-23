@@ -156,7 +156,18 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
             # --- RETURN LOGIC ---
             if headless:
                 # Return the structured object (Pydantic)
-                return response.parsed
+                if response.parsed:
+                    return response.parsed
+                else:
+                    print(f"⚠️ Warning: Model returned None for structured output.")
+                    # Return a fallback object so monitor.py doesn't crash
+                    return CompetitorAnalysis(
+                        name="Unknown (Analysis Failed)",
+                        value_proposition="Could not extract data.",
+                        solutions="N/A",
+                        industries="N/A",
+                        has_changes=False,
+                    )
             else:
                 # Return the standard text string
                 return response.text
