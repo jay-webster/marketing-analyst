@@ -152,11 +152,8 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                 # Send tool outputs back to model
                 response = chat.send_message(function_responses)
 
-                # --- HEADLESS FIX: FORCE EXIT AFTER TOOL USAGE ---
-                # In headless mode, we only want ONE turn of tool usage (analyze -> output).
-                # If we loop, the model gets confused and keeps calling the tool.
-                if headless:
-                    break
+                # Send tool outputs back to model
+                response = chat.send_message(function_responses)
 
             if iterations >= max_iterations:
                 print(f"⚠️ Warning: Agent reached max iterations ({max_iterations})")
