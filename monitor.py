@@ -1,100 +1,137 @@
 import os
-from slack_sdk import WebClient
-from slack_sdk.errors import SlackApiError
 import asyncio
 import agent
 import utils
 from datetime import datetime
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+from google.cloud import firestore
 
 
+# --- SLACK HELPER ---
+def post_to_slack(summary_text, pdf_bytes=None, filename=None):
+    token = os.environ.get("SLACK_BOT_TOKEN")
+    channel = os.environ.get("SLACK_CHANNEL_ID")
+    if not token or not channel:
+        print("❌ Slack config missing.")
+        return
+
+    client = WebClient(token=token)
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"📊 Daily Intel: {datetime.now().strftime('%Y-%m-%d')}",
+            },
+        },
+        {"type": "divider"},
+        {"type": "section", "text": {"type": "mrkdwn", "text": summary_text}},
+        {
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": "Detailed analysis is attached below."}
+            ],
+        },
+    ]
+
+    try:
+        client.chat_postMessage(channel=channel, blocks=blocks, text="Daily Update")
+        if pdf_bytes:
+            client.files_upload_v2(
+                channel=channel, content=pdf_bytes, filename=filename
+            )
+        print("✅ Slack notified.")
+    except SlackApiError as e:
+        print(f"❌ Slack Error: {e.response['error']}")
+
+
+# --- MAIN LOGIC ---
 async def run_daily_brief():
     print(f"🚀 Starting Daily Brief: {datetime.now()}")
 
-    # 1. SETUP
-    competitors = utils.get_competitors()
-    memory = utils.load_memory()
+    # 1. SETUP DATA FROM FIRESTORE
+    db = firestore.Client()
 
-    full_report_text = f"# Daily Competitive Intelligence Brief\n\n"
+    # Get Competitors from Firestore
+    comp_docs = db.collection("competitors").where("status", "==", "active").stream()
+    competitors = [doc.id for doc in comp_docs]
 
-    # We will build a single string for the Slack "Cover Letter"
-    slack_summary_text = f"🚀 *Daily Intel: {datetime.now().strftime('%Y-%m-%d')}*\n\n"
+    # Fallback if Firestore is empty
+    if not competitors:
+        print("⚠️ No competitors in Firestore. Using defaults.")
+        competitors = ["navistone.com", "pebblepost.com"]
 
+    full_report_data = []
+    slack_summary_lines = []
+
+    # 2. ANALYSIS LOOP
     for domain in competitors:
         print(f"--- Analyzing {domain} ---")
-
-        is_first_run = domain not in memory
-
-        if is_first_run:
-            print(f"🆕 First run for {domain}.")
-            prompt = (
-                f"Deep dive analysis of {domain}. \n"
-                f"Create a Baseline Strategic Profile focusing on: \n"
-                f"1. Core Product Features.\n"
-                f"2. Strategic Messaging.\n"
-                f"3. Recent Case Studies.\n"
-                f"Do NOT use the word 'New' unless explicitly dated in the last 30 days."
-            )
-        else:
-            print(f"🔄 Updating {domain}.")
-            prompt = (
-                f"Deep dive analysis of {domain}. \n"
-                f"Focus strictly on UPDATES since the last scan: \n"
-                f"1. New Product Features.\n"
-                f"2. Strategic Messaging changes.\n"
-                f"3. New Case Studies.\n"
-                f"If nothing new is found, explicitly state 'No significant updates detected.'"
-            )
-
         try:
-            report_part = await agent.run_agent_turn(
-                prompt, chat_history=[], headless=True
+            # Call Agent with headless=True to get the Pydantic Object
+            # Note: We pass a simple prompt because the Agent's system instruction handles the rest
+            analysis_result = await agent.run_agent_turn(
+                f"Analyze {domain}", chat_history=[], headless=True
             )
 
-            # Save to Memory & PDF Report
-            memory[domain] = {
-                "last_scan": datetime.now().strftime("%Y-%m-%d"),
-                "latest_summary": report_part[:200] + "...",
-            }
-            full_report_text += f"# Report: {domain}\n\n{report_part}\n\n"
+            # Store structured data for the PDF
+            full_report_data.append(
+                {
+                    "name": analysis_result.name,
+                    "content": {
+                        "value_proposition": analysis_result.value_proposition,
+                        "solutions": analysis_result.solutions,
+                        "industries": analysis_result.industries,
+                    },
+                    "has_changes": analysis_result.has_changes,
+                }
+            )
 
-            # Add to Slack Cover Letter
-            # Icon Logic
-            icon = "🟢"
-            if "New Product" in report_part or "Pricing" in report_part:
-                icon = "🔴"  # Alert
-            elif "No significant updates" in report_part:
-                icon = "⚪"
-
-            slack_summary_text += f"{icon} *{domain}*\n"
+            # Build Slack Status
+            icon = "🟢" if analysis_result.has_changes else "⚪"
+            slack_summary_lines.append(
+                f"{icon} *{analysis_result.name}*: Analysis Complete"
+            )
 
         except Exception as e:
-            print(f"❌ Failed {domain}: {e}")
-            full_report_text += f"# Report: {domain}\n\nError: {e}\n\n"
-            slack_summary_text += f"⚠️ *{domain}*: Error analyzing site.\n"
+            print(f"❌ Error analyzing {domain}: {e}")
+            slack_summary_lines.append(f"⚠️ *{domain}*: Error ({str(e)})")
 
-    # 2. SAVE MEMORY
-    utils.save_memory(memory)
+    # 3. GENERATE PDF (Passing the LIST, not a string)
+    # Ensure your utils.create_pdf is updated to handle this list!
+    pdf_bytes = utils.create_pdf(full_report_data)
 
-    # 3. GENERATE PDF
-    print("📝 Generating PDF...")
-    try:
-        pdf_bytes = utils.create_pdf(full_report_text)
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        filename = f"Daily_Brief_{date_str}.pdf"
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    filename = f"Daily_Brief_{date_str}.pdf"
 
-        # 4. SEND EMAIL
-        print("📧 Sending Email...")
+    # 4. SEND EMAILS TO ACTIVE SUBSCRIBERS
+    subscribers = db.collection("subscribers").where("status", "==", "active").stream()
+    subscriber_emails = [doc.to_dict()["email"] for doc in subscribers]
+
+    if subscriber_emails:
+        for email in subscriber_emails:
+            print(f"📧 Sending to {email}...")
+            utils.send_email(
+                subject=f"Daily Competitive Brief - {date_str}",
+                recipient_email=email,
+                body_text="Attached is your daily competitive intelligence strategy report.",
+                pdf_bytes=pdf_bytes,
+                filename=filename,
+            )
+    else:
+        print("⚠️ No subscribers found. Sending to default admin.")
         utils.send_email(
-            pdf_bytes, filename, subject=f"Daily Intelligence Brief: {date_str}"
+            subject="Internal Test Report",
+            recipient_email="jaybeaux@gmail.com",
+            body_text="No active subscribers found. Here is the test report.",
+            pdf_bytes=pdf_bytes,
+            filename=filename,
         )
 
-        # 5. UPLOAD TO SLACK (New!)
-        print("💬 Uploading to Slack...")
-        slack_summary_text += "\n📄 *See attached PDF for full details.*"
-        utils.send_slack_file(pdf_bytes, filename, slack_summary_text)
-
-    except Exception as e:
-        print(f"❌ Output Failed: {e}")
+    # 5. SEND TO SLACK
+    final_summary = "\n".join(slack_summary_lines)
+    post_to_slack(final_summary, pdf_bytes, filename)
 
 
 if __name__ == "__main__":

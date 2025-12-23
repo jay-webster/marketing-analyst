@@ -3,22 +3,38 @@ import os
 import streamlit as st
 from google import genai
 from google.genai import types
+from pydantic import BaseModel, Field
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
 # Configuration
 MCP_SERVER_URL = "https://marketing-mcp-4v4sc3n5qq-uc.a.run.app/sse"
-try:
-    PROJECT_ID = os.popen("gcloud config get-value project").read().strip()
-except:
-    PROJECT_ID = "marketing-analyst-449315"
+
+# FIX: Use environment variable for Project ID to avoid "gcloud not found" error
+PROJECT_ID = os.environ.get("GOOGLE_CLOUD_PROJECT", "marketing-analyst-prod")
 LOCATION = "us-central1"
+
+
+# --- DATA STRUCTURE FOR PDF ---
+class CompetitorAnalysis(BaseModel):
+    """Schema for structured competitive analysis reports."""
+
+    name: str = Field(description="The clean name of the competitor (e.g. PebblePost)")
+    value_proposition: str = Field(
+        description="The primary value proposition or headline"
+    )
+    solutions: str = Field(description="Key products, services, or solutions offered")
+    industries: str = Field(description="Primary industries or verticals targeted")
+    has_changes: bool = Field(
+        description="True if the website content appears to have new or significant updates"
+    )
 
 
 async def run_agent_turn(user_prompt, chat_history, headless=False):
     """
     Runs the agent.
-    If headless=True, it runs silently (no Streamlit UI updates).
+    - If headless=False: Returns STR (Chat mode with UI updates)
+    - If headless=True: Returns OBJECT (Structured Pydantic model for PDF)
     """
     async with sse_client(MCP_SERVER_URL, timeout=300) as streams:
         async with ClientSession(streams[0], streams[1]) as session:
@@ -46,36 +62,65 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                     )
 
             client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
+
+            # --- DYNAMIC CONFIGURATION ---
+            if headless:
+                # PDF MODE: Strict, one-turn execution logic to prevent loops
+                sys_instruction = """
+                You are a Competitive Intelligence Data Extractor.
+                
+                EXECUTION FLOW:
+                1. Call 'analyze_website' for the provided URL.
+                2. Extract the required data from the tool's response.
+                3. Immediately output the final JSON matching the schema.
+                
+                CRITICAL: YOU MUST FINISH AFTER THE FIRST TOOL CALL. 
+                Do not call any tools a second time. If you have the data, output the JSON and STOP.
+                """
+                config = types.GenerateContentConfig(
+                    system_instruction=sys_instruction,
+                    tools=[types.Tool(function_declarations=gemini_tools)],
+                    response_mime_type="application/json",
+                    response_schema=CompetitorAnalysis,
+                )
+            else:
+                # CHAT MODE: Standard text output
+                sys_instruction = """
+                You are a Senior Marketing Strategist.
+                CORE RULES:
+                1. ANALYSIS MODE: If the user provides a URL, ALWAYS use 'analyze_website'.
+                   - URL SANITIZATION: Always prepend 'https://' to domains.
+                2. CONVERSATION MODE: If the user asks a follow-up, use existing context.
+                3. FORMATTING: Format your output with clear headers (##) and bullet points.
+                """
+                config = types.GenerateContentConfig(
+                    system_instruction=sys_instruction,
+                    tools=[types.Tool(function_declarations=gemini_tools)],
+                )
+
+            # Initialize Chat
             chat = client.chats.create(
                 model="gemini-2.0-flash",
                 history=gemini_history,
-                config=types.GenerateContentConfig(
-                    system_instruction="""
-                    You are a Senior Marketing Strategist.
-                    CORE RULES:
-                    1. ANALYSIS MODE: If the user provides a URL, ALWAYS usage 'analyze_website'.
-                       - URL SANITIZATION: Always prepend 'https://' to domains.
-                    2. CONVERSATION MODE: If the user asks a follow-up, use existing context.
-                    3. FORMATTING: Format your output with clear headers (##) and bullet points.
-                    4. SPECIFICITY: When listing categories (competitors, software), provide 2-3 specific real-world examples.
-                    """,
-                    tools=[types.Tool(function_declarations=gemini_tools)],
-                ),
+                config=config,
             )
 
             response = chat.send_message(user_prompt)
 
             # Tool Execution Loop
-            while True:
+            max_iterations = 5 if headless else 10
+            iterations = 0
+
+            while iterations < max_iterations:
                 call_parts = [
                     p for p in response.candidates[0].content.parts if p.function_call
                 ]
                 if not call_parts:
                     break
 
+                iterations += 1
                 function_responses = []
 
-                # HEADLESS LOGIC SWITCH
                 if not headless:
                     # UI MODE: Show status spinners
                     with st.status(f"🕵️‍♀️ Agent is working...", expanded=True) as status:
@@ -95,9 +140,7 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                     # SILENT MODE: Just do the work
                     for part in call_parts:
                         fn = part.function_call
-                        print(
-                            f"Executing (Silent): {fn.name}"
-                        )  # Log to console instead
+                        print(f"Executing (Silent): {fn.name}")
                         tool_output = await execute_tool(session, fn, headless)
                         function_responses.append(
                             types.Part.from_function_response(
@@ -107,7 +150,16 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
 
                 response = chat.send_message(function_responses)
 
-            return response.text
+            if iterations >= max_iterations:
+                print(f"⚠️ Warning: Agent reached max iterations ({max_iterations})")
+
+            # --- RETURN LOGIC ---
+            if headless:
+                # Return the structured object (Pydantic)
+                return response.parsed
+            else:
+                # Return the standard text string
+                return response.text
 
 
 async def execute_tool(session, fn, headless):
@@ -117,10 +169,10 @@ async def execute_tool(session, fn, headless):
         if "url" in tool_args and isinstance(tool_args["url"], str):
             if not tool_args["url"].startswith(("http://", "https://")):
                 tool_args["url"] = f"https://{tool_args['url']}"
-                if not headless:
-                    st.caption(f"🔧 Auto-corrected URL to: {tool_args['url']}")
 
-        result = await session.call_tool(fn.name, arguments=tool_args)
+        # FIX: Added actual tool execution logic
+        result = await session.call_tool(fn.name, tool_args)
         return result.content[0].text
     except Exception as e:
-        return f"Error executing tool: {str(e)}"
+        print(f"❌ Tool Execution Error ({fn.name}): {e}")
+        return f"Error: {str(e)}"

@@ -1,8 +1,9 @@
-streamlit
 google-genai
-mcp
-asyncio
-fpdf
+google-cloud-firestore
 google-cloud-storage
-requests
 slack-sdk
+streamlit
+fpdf
+requests
+mcp
+

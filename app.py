@@ -1,145 +1,166 @@
 import streamlit as st
-import asyncio
-import agent
+from google.cloud import firestore
+import uuid
+import re
 import utils
+from datetime import datetime
 
-st.set_page_config(page_title="Market Intelligence Agent", layout="wide")
+db = firestore.Client()
 
-# --- AUTHENTICATION ---
-if not utils.check_password():
-    st.stop()
 
-# --- HEADER ---
-st.title("🕵️‍♀️ Market Intelligence Agent")
-st.markdown("---")
+# Helper: Verification Link
+def get_app_url():
+    # In production, replace this with your Cloud Run URL
+    return "https://marketing-intel-portal-1082338379066.us-central1.run.app"
 
-# --- TABS ---
-tab1, tab2 = st.tabs(["🔎 Research Analyst", "⚙️ Manage Robot"])
 
-# ==========================================
-# TAB 1: MANUAL RESEARCH (Original App)
-# ==========================================
-with tab1:
-    st.header("Ad-Hoc Competitor Analysis")
+# --- STATE MANAGEMENT ---
+if "page" not in st.session_state:
+    st.session_state["page"] = "login"
 
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        target_url = st.text_input("Enter Competitor URL", placeholder="example.com")
-    with col2:
-        analyze_btn = st.button("Analyze Site", type="primary")
 
-    if "chat_history" not in st.session_state:
-        st.session_state.chat_history = []
+def switch_page(page_name):
+    st.session_state["page"] = page_name
+    st.rerun()
 
-    if analyze_btn and target_url:
-        with st.status("🤖 AI Agent Working...", expanded=True) as status:
-            st.write("🌐 Accessing website...")
-            initial_prompt = f"Analyze {target_url}. Provide a strategic summary of their homepage value proposition."
 
-            try:
-                response = asyncio.run(
-                    agent.run_agent_turn(initial_prompt, st.session_state.chat_history)
-                )
-                st.session_state.chat_history.append(
-                    {"role": "user", "content": initial_prompt}
-                )
-                st.session_state.chat_history.append(
-                    {"role": "assistant", "content": response}
-                )
-                status.update(
-                    label="✅ Analysis Complete!", state="complete", expanded=False
-                )
-            except Exception as e:
-                st.error(f"Error: {e}")
-                status.update(label="❌ Failed", state="error")
+# --- VIEWS ---
+def show_login():
+    """Renders the Admin Login Page."""
+    st.header("🔑 Admin Login")
 
-    # Display Chat
-    for message in st.session_state.chat_history:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    # If already logged in, show the Dashboard
+    if st.session_state.get("password_correct", False):
+        show_admin_dashboard()
+        return
 
-    # Follow-up Input
-    if st.session_state.chat_history:
-        user_input = st.chat_input("Ask a follow-up question...")
-        if user_input:
-            with st.chat_message("user"):
-                st.markdown(user_input)
-            st.session_state.chat_history.append(
-                {"role": "user", "content": user_input}
+    # Check Password Logic
+    if "password" not in st.secrets:
+        st.warning("⚠️ No password set. Access is open.")
+        show_admin_dashboard()
+        return
+
+    password = st.text_input("Enter Password", type="password")
+    if st.button("Login"):
+        if password == st.secrets["password"]:
+            st.session_state["password_correct"] = True
+            st.rerun()
+        else:
+            st.error("❌ Incorrect Password")
+
+    st.divider()
+    st.caption("Don't have an account?")
+    st.button("Request Access", on_click=lambda: switch_page("signup"))
+
+
+def show_signup():
+    """Renders the Signup/Request Access Page."""
+    st.header("📝 Request Access")
+    st.markdown(
+        "Enter your company email to receive daily competitive intelligence reports."
+    )
+
+    with st.form("signup_form", clear_on_submit=True):
+        email_input = st.text_input("Email Address (e.g. name@navistone.com)")
+        submitted = st.form_submit_button("Send Verification Link")
+
+    if submitted:
+        email = email_input.strip().lower()
+        if not re.match(r"^[a-zA-Z0-9_.+-]+@navistone\.com$", email):
+            st.error("🚨 Access Restricted: Please use a valid @navistone.com email.")
+        else:
+            verification_token = str(uuid.uuid4())
+            db.collection("pending_verifications").document(email).set(
+                {
+                    "email": email,
+                    "token": verification_token,
+                    "created_at": firestore.SERVER_TIMESTAMP,
+                }
             )
+            verify_link = f"{get_app_url()}?token={verification_token}"
+            utils.send_verification_email(email, verify_link)
+            st.success(f"✅ Verification sent to {email}. Check your inbox.")
 
-            with st.spinner("Thinking..."):
-                response = asyncio.run(
-                    agent.run_agent_turn(user_input, st.session_state.chat_history)
-                )
-                with st.chat_message("assistant"):
-                    st.markdown(response)
-                st.session_state.chat_history.append(
-                    {"role": "assistant", "content": response}
-                )
+    st.divider()
+    st.button("Back to Login", on_click=lambda: switch_page("login"))
 
-            # PDF Download Button
-            full_text = "\n\n".join(
-                [
-                    f"**{m['role'].upper()}**: {m['content']}"
-                    for m in st.session_state.chat_history
-                ]
-            )
-            pdf_bytes = utils.create_pdf(full_text)
-            st.download_button(
-                "📄 Download Report as PDF",
-                data=pdf_bytes,
-                file_name="research_report.pdf",
-                mime="application/pdf",
-            )
 
-# ==========================================
-# TAB 2: ROBOT MANAGER (New Feature)
-# ==========================================
-with tab2:
-    st.header("⚙️ Daily Monitor Settings")
+def show_admin_dashboard():
+    """Renders the Robot Manager (Admin UI)."""
+    st.success("🔓 Access Granted")
+    st.subheader("⚙️ Robot Manager")
     st.info("Manage the list of competitors the Cloud Robot watches every morning.")
 
-    # Load current list from Cloud
     current_competitors = utils.get_competitors()
-
-    # Layout: List on left, Add form on right
     col_list, col_add = st.columns([2, 1])
 
     with col_list:
-        st.subheader(f"Current Watchlist ({len(current_competitors)})")
-
-        # Display as a clean table with delete buttons
+        st.write(f"**Current Watchlist ({len(current_competitors)})**")
         for comp in current_competitors:
             c1, c2 = st.columns([4, 1])
-            c1.markdown(f"**{comp}**")
-            if c2.button("🗑️", key=f"del_{comp}", help=f"Remove {comp}"):
+            c1.text(comp)
+            if c2.button("🗑️", key=f"del_{comp}"):
                 new_list = [x for x in current_competitors if x != comp]
-                if utils.save_competitors(new_list):
-                    st.success(f"Removed {comp}")
-                    st.rerun()
-                else:
-                    st.error("Failed to save changes.")
+                utils.save_competitors(new_list)
+                st.rerun()
 
     with col_add:
-        st.subheader("Add New Target")
+        st.write("**Add Target**")
         with st.form("add_comp_form"):
-            new_comp = st.text_input("Domain (e.g. competitors.com)")
-            submitted = st.form_submit_button("Add to Watchlist")
-
-            if submitted and new_comp:
+            new_comp = st.text_input("Domain")
+            if st.form_submit_button("Add"):
                 clean_comp = (
                     new_comp.replace("https://", "")
                     .replace("http://", "")
                     .replace("www.", "")
                     .strip()
                 )
-                if clean_comp in current_competitors:
-                    st.warning("Already in the list!")
-                else:
+                if clean_comp and clean_comp not in current_competitors:
                     current_competitors.append(clean_comp)
-                    if utils.save_competitors(current_competitors):
-                        st.success(f"Added {clean_comp}")
-                        st.rerun()
-                    else:
-                        st.error("Failed to save to Cloud.")
+                    utils.save_competitors(current_competitors)
+                    st.rerun()
+
+
+# --- GLOBAL HANDLERS (Execute on every run) ---
+query_params = st.query_params
+
+# 1. Handle Verification
+if "token" in query_params:
+    token = query_params["token"]
+    pending_ref = (
+        db.collection("pending_verifications")
+        .where("token", "==", token)
+        .limit(1)
+        .get()
+    )
+    if pending_ref:
+        user_data = pending_ref[0].to_dict()
+        email = user_data["email"]
+        db.collection("subscribers").document(email).set(
+            {
+                "email": email,
+                "status": "active",
+                "signup_date": firestore.SERVER_TIMESTAMP,
+            }
+        )
+        db.collection("pending_verifications").document(pending_ref[0].id).delete()
+        st.balloons()
+        st.success(f"🎉 Account Verified! {email} is now active.")
+        utils.send_welcome_email(email)
+    else:
+        st.error("❌ Invalid or expired verification link.")
+
+# 2. Handle Unsubscribe
+if "unsub" in query_params:
+    email = query_params["unsub"]
+    db.collection("subscribers").document(email).delete()
+    st.success(f"🗑️ Unsubscribed {email}.")
+
+
+# --- MAIN APP ROUTER ---
+st.title("🚀 Marketing Intelligence Portal")
+
+if st.session_state["page"] == "login":
+    show_login()
+elif st.session_state["page"] == "signup":
+    show_signup()
