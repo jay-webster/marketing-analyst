@@ -143,6 +143,7 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                         fn = part.function_call
                         print(f"Executing (Silent): {fn.name}")
                         tool_output = await execute_tool(session, fn, headless)
+                        print(f"DEBUG: Tool Output Length: {len(tool_output)}")
                         function_responses.append(
                             types.Part.from_function_response(
                                 name=fn.name, response={"result": tool_output}
