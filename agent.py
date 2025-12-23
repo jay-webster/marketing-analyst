@@ -152,9 +152,6 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                 # Send tool outputs back to model
                 response = chat.send_message(function_responses)
 
-                # Send tool outputs back to model
-                response = chat.send_message(function_responses)
-
             if iterations >= max_iterations:
                 print(f"⚠️ Warning: Agent reached max iterations ({max_iterations})")
 
