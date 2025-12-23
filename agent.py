@@ -65,17 +65,18 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
 
             # --- DYNAMIC CONFIGURATION ---
             if headless:
-                # PDF MODE: Strict, one-turn execution logic to prevent loops
+                # PDF MODE: Strict extraction logic
                 sys_instruction = """
                 You are a Competitive Intelligence Data Extractor.
                 
-                CORE TASK:
+                STEP-BY-STEP:
                 1. Call 'analyze_website' for the provided URL.
-                2. If "PREVIOUS ANALYSIS" is provided in the prompt, COMPARE the new data with it.
-                3. Set 'has_changes' to True ONLY if there is a significant change in product, positioning, or messaging.
-                4. Immediately output the final JSON matching the schema.
+                2. Based on the tool's findings, generate the report.
+                3. If 'PREVIOUS ANALYSIS' exists, compare it to detect 'has_changes'.
+                4. Output ONLY the JSON matching the schema.
                 
-                CRITICAL: Output ONLY the raw JSON. Do not explain your thought process.
+                CRITICAL: You are in a structured pipeline. Do not talk. Do not explain. 
+                Output the valid JSON immediately after the tool response.
                 """
                 config = types.GenerateContentConfig(
                     system_instruction=sys_instruction,
