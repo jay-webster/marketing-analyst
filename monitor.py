@@ -53,9 +53,13 @@ async def run_daily_brief():
     # 1. SETUP DATA FROM FIRESTORE
     db = firestore.Client()
 
-    # Get Competitors from Firestore
-    comp_docs = db.collection("competitors").where("status", "==", "active").stream()
+    # Get Competitors from Firestore (Corrected Query)
+    # We simplified the collection, so we just stream all docs
+    comp_docs = db.collection("competitors").stream()
     competitors = [doc.id for doc in comp_docs]
+
+    # Load Memory for Diffing
+    memory = utils.load_memory()
 
     # Fallback if Firestore is empty
     if not competitors:
@@ -68,11 +72,16 @@ async def run_daily_brief():
     # 2. ANALYSIS LOOP
     for domain in competitors:
         print(f"--- Analyzing {domain} ---")
+
+        # Get previous analysis from memory (if any)
+        prev_analysis = memory.get(domain, "No previous data.")
+
         try:
-            # Call Agent with headless=True to get the Pydantic Object
-            # Note: We pass a simple prompt because the Agent's system instruction handles the rest
+            # Call Agent with context about the previous state
+            prompt = f"Analyze {domain}. PREVIOUS ANALYSIS: {prev_analysis}"
+
             analysis_result = await agent.run_agent_turn(
-                f"Analyze {domain}", chat_history=[], headless=True
+                prompt, chat_history=[], headless=True
             )
 
             # Store structured data for the PDF
@@ -88,6 +97,13 @@ async def run_daily_brief():
                 }
             )
 
+            # Update memory with the latest text representation for next time
+            memory[domain] = (
+                f"Value Prop: {analysis_result.value_proposition} | "
+                f"Solutions: {analysis_result.solutions} | "
+                f"Industries: {analysis_result.industries}"
+            )
+
             # Build Slack Status
             icon = "🟢" if analysis_result.has_changes else "⚪"
             slack_summary_lines.append(
@@ -97,6 +113,9 @@ async def run_daily_brief():
         except Exception as e:
             print(f"❌ Error analyzing {domain}: {e}")
             slack_summary_lines.append(f"⚠️ *{domain}*: Error ({str(e)})")
+
+    # Save updated memory back to cloud
+    utils.save_memory(memory)
 
     # 3. GENERATE PDF (Passing the LIST, not a string)
     # Ensure your utils.create_pdf is updated to handle this list!

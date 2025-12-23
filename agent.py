@@ -69,13 +69,13 @@ async def run_agent_turn(user_prompt, chat_history, headless=False):
                 sys_instruction = """
                 You are a Competitive Intelligence Data Extractor.
                 
-                EXECUTION FLOW:
+                CORE TASK:
                 1. Call 'analyze_website' for the provided URL.
-                2. Extract the required data from the tool's response.
-                3. Immediately output the final JSON matching the schema.
+                2. If "PREVIOUS ANALYSIS" is provided in the prompt, COMPARE the new data with it.
+                3. Set 'has_changes' to True ONLY if there is a significant change in product, positioning, or messaging.
+                4. Immediately output the final JSON matching the schema.
                 
-                CRITICAL: YOU MUST FINISH AFTER THE FIRST TOOL CALL. 
-                Do not call any tools a second time. If you have the data, output the JSON and STOP.
+                CRITICAL: Output ONLY the raw JSON. Do not explain your thought process.
                 """
                 config = types.GenerateContentConfig(
                     system_instruction=sys_instruction,
