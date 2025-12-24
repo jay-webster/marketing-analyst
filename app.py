@@ -9,9 +9,8 @@ from datetime import datetime
 db = firestore.Client()
 
 
-# Helper: Verification Link
 def get_app_url():
-    # In production, replace this with your Cloud Run URL
+    # Cloud Run URL
     return "https://marketing-intel-portal-1082338379066.us-central1.run.app"
 
 
@@ -27,26 +26,31 @@ def switch_page(page_name):
 
 # --- VIEWS ---
 def show_login():
-    """Renders the Admin Login Page."""
     st.header("🔑 Admin Login")
 
-    # If already logged in, show the Dashboard
     if st.session_state.get("password_correct", False):
         show_admin_dashboard()
         return
 
-    # Check Password Logic
+    # Unified password check across agent/monitor/app
     try:
-        stored_password = st.secrets.get("password")
-    except Exception:
+        # Check Streamlit secrets first, then Environment variables
+        stored_password = st.secrets.get("ADMIN_PASSWORD") or os.environ.get(
+            "ADMIN_PASSWORD"
+        )
+    except:
         stored_password = os.environ.get("ADMIN_PASSWORD")
 
     if not stored_password:
-        st.warning("⚠️ No password set. Access is open.")
-        show_admin_dashboard()
+        st.warning(
+            "⚠️ ADMIN_PASSWORD not set in Cloud Run. Access is currently open for testing."
+        )
+        if st.button("Enter Dashboard"):
+            st.session_state["password_correct"] = True
+            st.rerun()
         return
 
-    password = st.text_input("Enter Password", type="password")
+    password = st.text_input("Enter Admin Password", type="password")
     if st.button("Login"):
         if password == stored_password:
             st.session_state["password_correct"] = True
@@ -55,25 +59,23 @@ def show_login():
             st.error("❌ Incorrect Password")
 
     st.divider()
-    st.caption("Don't have an account?")
+    st.caption("Not an Admin? Request daily reports below.")
     st.button("Request Access", on_click=lambda: switch_page("signup"))
 
 
 def show_signup():
-    """Renders the Signup/Request Access Page."""
     st.header("📝 Request Access")
-    st.markdown(
-        "Enter your company email to receive daily competitive intelligence reports."
-    )
+    st.markdown("Enter your email to receive daily competitive intelligence reports.")
 
     with st.form("signup_form", clear_on_submit=True):
-        email_input = st.text_input("Email Address (e.g. name@navistone.com)")
+        email_input = st.text_input("Email Address")
         submitted = st.form_submit_button("Send Verification Link")
 
     if submitted:
         email = email_input.strip().lower()
-        if not re.match(r"^[a-zA-Z0-9_.+-]+@navistone\.com$", email):
-            st.error("🚨 Access Restricted: Please use a valid @navistone.com email.")
+        # Regex update to allow standard emails or keep your navistone restriction
+        if not re.match(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$", email):
+            st.error("🚨 Please use a valid email address.")
         else:
             verification_token = str(uuid.uuid4())
             db.collection("pending_verifications").document(email).set(
@@ -85,56 +87,44 @@ def show_signup():
             )
             verify_link = f"{get_app_url()}?token={verification_token}"
             utils.send_verification_email(email, verify_link)
-            st.success(f"✅ Verification sent to {email}. Check your inbox.")
+            st.success(f"✅ Verification link sent to {email}.")
 
     st.divider()
     st.button("Back to Login", on_click=lambda: switch_page("login"))
 
 
 def show_admin_dashboard():
-    """Renders the Robot Manager (Admin UI)."""
-    st.success("🔓 Access Granted")
-    st.subheader("⚙️ Robot Manager")
-    st.info("Manage the list of competitors the Cloud Robot watches every morning.")
+    st.success("🔓 Admin Access Active")
+    st.subheader("⚙️ Competitor Watchlist")
 
+    # Get competitors from Firestore via utils
     current_competitors = utils.get_competitors()
 
-    # Ensure navistone.com is always present
-    if "navistone.com" not in current_competitors:
-        current_competitors.insert(0, "navistone.com")
+    # Ensure defaults exist without infinite rerun
+    if not current_competitors:
+        current_competitors = ["navistone.com"]
         utils.save_competitors(current_competitors)
-        st.rerun()
 
     col_list, col_add = st.columns([2, 1])
 
     with col_list:
-        st.write(f"**Current Watchlist ({len(current_competitors)})**")
+        st.write(f"**Watching {len(current_competitors)} Targets**")
         for comp in current_competitors:
             c1, c2 = st.columns([4, 1])
-            c1.text(comp)
-
-            # Prevent deleting the default domain
-            if comp == "navistone.com":
-                c2.button(
-                    "🔒",
-                    key="lock_ns",
-                    disabled=True,
-                    help="Default domain cannot be removed.",
-                )
-            else:
-                if c2.button("🗑️", key=f"del_{comp}"):
-                    new_list = [x for x in current_competitors if x != comp]
-                    utils.save_competitors(new_list)
-                    st.rerun()
+            c1.text(f"🌐 {comp}")
+            if c2.button("🗑️", key=f"del_{comp}"):
+                new_list = [x for x in current_competitors if x != comp]
+                utils.save_competitors(new_list)
+                st.rerun()
 
     with col_add:
-        st.write("**Add Target**")
-        # clear_on_submit=True resets the text input after logic runs
+        st.write("**Add New Target**")
         with st.form("add_comp_form", clear_on_submit=True):
-            new_comp = st.text_input("Domain")
+            new_comp = st.text_input("Domain (e.g. lob.com)")
             if st.form_submit_button("Add"):
                 clean_comp = (
-                    new_comp.replace("https://", "")
+                    new_comp.lower()
+                    .replace("https://", "")
                     .replace("http://", "")
                     .replace("www.", "")
                     .strip()
@@ -145,21 +135,19 @@ def show_admin_dashboard():
                     st.rerun()
 
 
-# --- GLOBAL HANDLERS (Execute on every run) ---
-query_params = st.query_params
+# --- GLOBAL HANDLERS ---
+params = st.query_params
 
-# 1. Handle Verification
-if "token" in query_params:
-    token = query_params["token"]
-    pending_ref = (
+if "token" in params:
+    token = params["token"]
+    pending = (
         db.collection("pending_verifications")
         .where("token", "==", token)
         .limit(1)
         .get()
     )
-    if pending_ref:
-        user_data = pending_ref[0].to_dict()
-        email = user_data["email"]
+    if pending:
+        email = pending[0].to_dict()["email"]
         db.collection("subscribers").document(email).set(
             {
                 "email": email,
@@ -167,24 +155,19 @@ if "token" in query_params:
                 "signup_date": firestore.SERVER_TIMESTAMP,
             }
         )
-        db.collection("pending_verifications").document(pending_ref[0].id).delete()
+        db.collection("pending_verifications").document(pending[0].id).delete()
         st.balloons()
-        st.success(f"🎉 Account Verified! {email} is now active.")
+        st.success(f"🎉 Subscribed! {email} will now receive reports.")
         utils.send_welcome_email(email)
-    else:
-        st.error("❌ Invalid or expired verification link.")
 
-# 2. Handle Unsubscribe
-if "unsub" in query_params:
-    email = query_params["unsub"]
+if "unsub" in params:
+    email = params["unsub"]
     db.collection("subscribers").document(email).delete()
-    st.success(f"🗑️ Unsubscribed {email}.")
+    st.warning(f"Unsubscribed {email}.")
 
-
-# --- MAIN APP ROUTER ---
+# --- APP ROUTER ---
 st.title("🚀 Marketing Intelligence Portal")
-
 if st.session_state["page"] == "login":
     show_login()
-elif st.session_state["page"] == "signup":
+else:
     show_signup()

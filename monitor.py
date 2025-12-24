@@ -50,18 +50,16 @@ def post_to_slack(summary_text, pdf_bytes=None, filename=None):
 async def run_daily_brief():
     print(f"🚀 Starting Daily Brief: {datetime.now()}")
 
-    # 1. SETUP DATA FROM FIRESTORE
-    db = firestore.Client()
+    db = firestore.Client(project="marketing-analyst-prod")
 
-    # Get Competitors from Firestore (Corrected Query)
-    # We simplified the collection, so we just stream all docs
+    # 1. BROAD FETCH COMPETITORS (Ensures we don't skip anyone)
     comp_docs = db.collection("competitors").stream()
     competitors = [doc.id for doc in comp_docs]
 
-    # Load Memory for Diffing
+    # 2. LOAD MEMORY (The Baseline)
     memory = utils.load_memory()
+    print(f"DEBUG: Loaded memory for {len(memory)} domains.")
 
-    # Fallback if Firestore is empty
     if not competitors:
         print("⚠️ No competitors in Firestore. Using defaults.")
         competitors = ["navistone.com", "pebblepost.com"]
@@ -69,88 +67,75 @@ async def run_daily_brief():
     full_report_data = []
     slack_summary_lines = []
 
-    # 2. ANALYSIS LOOP
+    # 3. ANALYSIS LOOP
     for domain in competitors:
         print(f"--- Analyzing {domain} ---")
 
-        # Get previous analysis from memory (if any)
-        prev_analysis = memory.get(domain, "No previous data.")
+        # Check if this is the first time we see this domain
+        prev_analysis = memory.get(domain)
+        is_baseline = prev_analysis is None
 
         try:
-            # Call Agent with context about the previous state
-            prompt = f"Analyze {domain}. PREVIOUS ANALYSIS: {prev_analysis}"
-
+            print(f"DEBUG: Calling agent for {domain}...")
             analysis_result = await agent.run_agent_turn(
-                prompt, chat_history=[], headless=True
+                f"Analyze {domain}", [], headless=True
             )
 
-            # Store structured data for the PDF
+            # Check if the agent returned the failure object
+            if "Error" in analysis_result.name or "Failed" in analysis_result.name:
+                print(
+                    f"⚠️ Agent returned a failure object for {domain}: {analysis_result.value_proposition}"
+                )
+
             full_report_data.append(
                 {
-                    "name": analysis_result.name,
+                    "name": (
+                        domain
+                        if "Error" in analysis_result.name
+                        else analysis_result.name
+                    ),
                     "content": {
                         "value_proposition": analysis_result.value_proposition,
                         "solutions": analysis_result.solutions,
                         "industries": analysis_result.industries,
                     },
-                    "has_changes": analysis_result.has_changes,
+                    "has_changes": True,
                 }
             )
-
-            # Update memory with the latest text representation for next time
-            memory[domain] = (
-                f"Value Prop: {analysis_result.value_proposition} | "
-                f"Solutions: {analysis_result.solutions} | "
-                f"Industries: {analysis_result.industries}"
-            )
-
-            # Build Slack Status
-            icon = "🟢" if analysis_result.has_changes else "⚪"
-            slack_summary_lines.append(
-                f"{icon} *{analysis_result.name}*: Analysis Complete"
-            )
+            memory[domain] = analysis_result.value_proposition
+            slack_summary_lines.append(f"🟢 *{domain}*: Analysis Complete")
 
         except Exception as e:
-            print(f"❌ Error analyzing {domain}: {e}")
-            slack_summary_lines.append(f"⚠️ *{domain}*: Error ({str(e)})")
+            # THIS IS THE CRITICAL LOG LINE
+            print(f"❌ CRITICAL ERROR on {domain}: {type(e).__name__} - {str(e)}")
+            slack_summary_lines.append(f"⚠️ *{domain}*: Analysis Failed")
 
-    # Save updated memory back to cloud
+    # 5. SAVE MEMORY BACK TO GCS
     utils.save_memory(memory)
 
-    # 3. GENERATE PDF (Passing the LIST, not a string)
-    # Ensure your utils.create_pdf is updated to handle this list!
+    # 6. GENERATE PDF
     pdf_bytes = utils.create_pdf(full_report_data)
-
     date_str = datetime.now().strftime("%Y-%m-%d")
     filename = f"Daily_Brief_{date_str}.pdf"
 
-    # 4. SEND EMAILS TO ACTIVE SUBSCRIBERS
+    # 7. SEND EMAILS
     subscribers = db.collection("subscribers").where("status", "==", "active").stream()
     subscriber_emails = [doc.to_dict()["email"] for doc in subscribers]
 
-    if subscriber_emails:
-        for email in subscriber_emails:
-            print(f"📧 Sending to {email}...")
-            utils.send_email(
-                subject=f"Daily Competitive Brief - {date_str}",
-                recipient_email=email,
-                body_text="Attached is your daily competitive intelligence strategy report.",
-                pdf_bytes=pdf_bytes,
-                filename=filename,
-            )
-    else:
-        print("⚠️ No subscribers found. Sending to default admin.")
+    if not subscriber_emails:
+        subscriber_emails = ["jaybeaux@gmail.com"]  # Default fallback
+
+    for email in subscriber_emails:
         utils.send_email(
-            subject="Internal Test Report",
-            recipient_email="jaybeaux@gmail.com",
-            body_text="No active subscribers found. Here is the test report.",
+            subject=f"Daily Competitive Brief - {date_str}",
+            recipient_email=email,
+            body_text="Attached is your daily competitive intelligence strategy report.",
             pdf_bytes=pdf_bytes,
             filename=filename,
         )
 
-    # 5. SEND TO SLACK
-    final_summary = "\n".join(slack_summary_lines)
-    post_to_slack(final_summary, pdf_bytes, filename)
+    # 8. SEND TO SLACK
+    post_to_slack("\n".join(slack_summary_lines), pdf_bytes, filename)
 
 
 if __name__ == "__main__":

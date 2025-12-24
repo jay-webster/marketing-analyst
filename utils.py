@@ -264,7 +264,8 @@ def create_pdf(report_data):
         pdf.add_page()
         pdf.competitor_header("No Significant Changes")
         pdf.set_font("Arial", "", 11)
-        names = ", ".join([c["name"] for c in unchanged_list])
+        # FIX: Sanitize the names before joining to prevent Unicode crashes
+        names = ", ".join([pdf.sanitize(c["name"]) for c in unchanged_list])
         pdf.body_text(
             f"The following competitors showed no significant website updates since the last report: {names}"
         )
