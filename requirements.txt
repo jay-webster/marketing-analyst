@@ -1,9 +1,10 @@
+fastmcp
+mcp[sse]
 google-genai
 google-cloud-firestore
-google-cloud-storage
 slack-sdk
+reportlab
+python-dotenv
 streamlit
-fpdf
 requests
-mcp
-
+uvicorn
