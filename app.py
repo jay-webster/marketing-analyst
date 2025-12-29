@@ -2,6 +2,7 @@ import streamlit as st
 import utils
 import os
 import asyncio
+import monitor  # Needed for the discovery function
 
 st.set_page_config(page_title="Marketing Analyst Agent", page_icon="🕵️‍♂️")
 
@@ -42,7 +43,6 @@ def show_subscribe_page():
     st.markdown(
         "Get automated competitive updates delivered to your inbox every morning."
     )
-
     email = st.text_input("Enter your work email")
 
     if st.button("Subscribe"):
@@ -64,13 +64,75 @@ def show_admin_dashboard():
     st.title("🕵️‍♂️ Analyst Admin Dashboard")
     st.markdown("Manage competitors and subscribers.")
 
-    # 1. Competitor Management
-    st.header("🏢 Competitors")
+    # --- 1. NEW: COMPETITOR DISCOVERY (With State Management) ---
+    if "discovery_results" not in st.session_state:
+        st.session_state.discovery_results = []
+
+    with st.expander("✨ Competitor Discovery (AI Powered)", expanded=False):
+        st.markdown("Enter a target company URL to find relevant competitors.")
+
+        c1, c2, c3 = st.columns([3, 1, 1])
+        with c1:
+            target_domain = st.text_input(
+                "Target Domain",
+                placeholder="e.g., yourclient.com",
+                label_visibility="collapsed",
+            )
+        with c2:
+            scan_clicked = st.button("🔍 Scan Market")
+        with c3:
+            if st.button("🗑️ Clear Results"):
+                st.session_state.discovery_results = []
+                st.rerun()
+
+        # Execute Scan
+        if scan_clicked and target_domain:
+            with st.spinner(f"Agent is researching competitors for {target_domain}..."):
+                # Run the async discovery function
+                results = asyncio.run(monitor.discover_competitors(target_domain))
+                if results:
+                    st.session_state.discovery_results = results
+                else:
+                    st.warning(
+                        "No competitors found. Try a broader domain or industry name."
+                    )
+
+        # Render Results from State
+        if st.session_state.discovery_results:
+            st.success(
+                f"Found {len(st.session_state.discovery_results)} potential competitors."
+            )
+
+            # Use enumerate to get an index for unique keys
+            for i, comp in enumerate(st.session_state.discovery_results):
+                with st.container(border=True):
+                    col_a, col_b = st.columns([4, 1])
+                    with col_a:
+                        st.subheader(comp.get("name", "Unknown"))
+                        st.caption(f"Domain: {comp.get('domain')}")
+                        st.write(f"**Why:** {comp.get('reason')}")
+                    with col_b:
+                        dom = comp.get("domain", "").lower()
+
+                        # Add Button
+                        if st.button("Add", key=f"add_{dom}_{i}"):
+                            utils.add_competitor(dom)
+                            st.toast(f"✅ Added {dom}!")
+
+                        # Ignore Button (Removes from state and reruns)
+                        if st.button("Ignore", key=f"ignore_{dom}_{i}"):
+                            st.session_state.discovery_results.pop(i)
+                            st.rerun()
+
+    st.divider()
+
+    # --- 2. EXISTING: COMPETITOR LIST ---
+    st.header("🏢 Tracked Competitors")
 
     col1, col2 = st.columns([3, 1])
     with col1:
         new_comp = st.text_input(
-            "Add Competitor Domain",
+            "Manually Add Domain",
             placeholder="e.g. lob.com",
             label_visibility="collapsed",
         )
@@ -81,11 +143,7 @@ def show_admin_dashboard():
                 st.success(f"Added {new_comp}")
                 st.rerun()
 
-    st.divider()
-
-    # List with Delete Buttons
     current_competitors = utils.get_competitors()
-
     if not current_competitors:
         st.info("No competitors tracked yet.")
     else:
@@ -97,16 +155,14 @@ def show_admin_dashboard():
                 if st.button("Delete", key=f"del_{comp}"):
                     utils.remove_competitor(comp)
                     st.success(f"Removed {comp}")
-                    # Small delay to allow UI update
                     asyncio.run(asyncio.sleep(0.5))
                     st.rerun()
 
     st.divider()
 
-    # 2. Subscriber Management
+    # --- 3. SUBSCRIBERS ---
     st.header("👥 Subscribers")
     subs = utils.get_subscribers()
-
     if subs:
         st.table(subs)
     else:
@@ -121,7 +177,6 @@ def show_admin_dashboard():
 
 def main():
     sidebar_selection = st.sidebar.radio("Navigation", ["Subscribe", "Admin Login"])
-
     if sidebar_selection == "Subscribe":
         show_subscribe_page()
     elif sidebar_selection == "Admin Login":
