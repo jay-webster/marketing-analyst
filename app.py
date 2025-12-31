@@ -2,50 +2,33 @@ import streamlit as st
 import utils
 import os
 import asyncio
-import re
-import monitor  # Needed for the discovery function
+import pandas as pd
 from dotenv import load_dotenv
+
+# ADD THESE: The new helper functions from the Refactor
+from monitor import (
+    run_daily_brief,
+    _detect_website_changes,
+    _detect_linkedin_updates,
+    _prepare_company_data,
+)
+
 load_dotenv()
+
+# DEBUG: Check if file was loaded and what the value is
+print(f"Did .env load? {load_dotenv()}")
+print(f"Password Found: {os.getenv('ADMIN_PASSWORD')}")
 
 st.set_page_config(page_title="Marketing Analyst Agent", page_icon="🕵️‍♂️")
 
-# Security: No default password - must be set via environment variable
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
 
-
-def is_valid_email(email: str) -> bool:
-    """
-    Validates email format to prevent injection and ensure RFC compliance.
-    Returns True if email is valid, False otherwise.
-    """
-    if not email or len(email) > 254:
-        return False
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-    return bool(re.match(pattern, email))
-
-
-def is_valid_domain(domain: str) -> bool:
-    """
-    Validates domain format to prevent injection attacks.
-    Returns True if domain is valid, False otherwise.
-    """
-    if not domain or len(domain) > 253:
-        return False
-    # Remove protocol if present
-    domain = domain.replace('http://', '').replace('https://', '').strip()
-    # Basic domain validation: alphanumeric, hyphens, dots allowed
-    pattern = r'^[a-z0-9]+([\-\.]{1}[a-z0-9]+)*\.[a-z]{2,}$'
-    return bool(re.match(pattern, domain.lower()))
+if not ADMIN_PASSWORD:
+    st.error("Admin access disabled: ADMIN_PASSWORD environment variable is missing.")
+    st.stop()
 
 
 def check_password():
-    """Check if user has entered correct admin password."""
-    # Security check: ensure ADMIN_PASSWORD is configured
-    if not ADMIN_PASSWORD:
-        st.error("⚠️ ADMIN_PASSWORD environment variable is not set. Admin access is disabled for security.")
-        st.info("💡 Please set the ADMIN_PASSWORD environment variable to enable admin access.")
-        return False
-    
     def password_entered():
         if st.session_state["password"] == ADMIN_PASSWORD:
             st.session_state["password_correct"] = True
@@ -82,11 +65,7 @@ def show_subscribe_page():
     email = st.text_input("Enter your work email")
 
     if st.button("Subscribe"):
-        if not email:
-            st.error("Please enter an email address.")
-        elif not is_valid_email(email):
-            st.error("⚠️ Please enter a valid email address (e.g., user@company.com).")
-        else:
+        if "@" in email and "." in email:
             if utils.add_subscriber(email):
                 st.success(f"✅ Subscribed! You will receive daily updates at {email}.")
                 with st.spinner("Generating your Baseline Report..."):
@@ -96,10 +75,15 @@ def show_subscribe_page():
                 )
             else:
                 st.warning("⚠️ This email is already subscribed.")
+        else:
+            st.error("Please enter a valid email address.")
 
 
-def _render_competitor_discovery_ui():
-    """Renders the AI-powered competitor discovery section."""
+def show_admin_dashboard():
+    st.title("🕵️‍♂️ Analyst Admin Dashboard")
+    st.markdown("Manage competitors and subscribers.")
+
+    # --- 1. COMPETITOR DISCOVERY ---
     if "discovery_results" not in st.session_state:
         st.session_state.discovery_results = []
 
@@ -120,7 +104,6 @@ def _render_competitor_discovery_ui():
                 st.session_state.discovery_results = []
                 st.rerun()
 
-        # Execute Scan
         if scan_clicked and target_domain:
             with st.spinner(f"Agent is researching competitors for {target_domain}..."):
                 results = asyncio.run(monitor.discover_competitors(target_domain))
@@ -131,12 +114,10 @@ def _render_competitor_discovery_ui():
                         "No competitors found. Try a broader domain or industry name."
                     )
 
-        # Render Results from State
         if st.session_state.discovery_results:
             st.success(
                 f"Found {len(st.session_state.discovery_results)} potential competitors."
             )
-
             for i, comp in enumerate(st.session_state.discovery_results):
                 with st.container(border=True):
                     col_a, col_b = st.columns([4, 1])
@@ -146,18 +127,16 @@ def _render_competitor_discovery_ui():
                         st.write(f"**Why:** {comp.get('reason')}")
                     with col_b:
                         dom = comp.get("domain", "").lower()
-
                         if st.button("Add", key=f"add_{dom}_{i}"):
                             utils.add_competitor(dom)
                             st.toast(f"✅ Added {dom}!")
-
                         if st.button("Ignore", key=f"ignore_{dom}_{i}"):
                             st.session_state.discovery_results.pop(i)
                             st.rerun()
 
+    st.divider()
 
-def _render_competitor_list_ui():
-    """Renders the tracked competitors list and management section."""
+    # --- 2. TRACKED COMPETITORS ---
     st.header("🏢 Tracked Competitors")
 
     col1, col2 = st.columns([3, 1])
@@ -169,11 +148,7 @@ def _render_competitor_list_ui():
         )
     with col2:
         if st.button("Add New"):
-            if not new_comp:
-                st.error("Please enter a domain.")
-            elif not is_valid_domain(new_comp):
-                st.error("⚠️ Please enter a valid domain (e.g., competitor.com).")
-            else:
+            if new_comp and "." in new_comp:
                 utils.add_competitor(new_comp.lower().strip())
                 st.success(f"Added {new_comp}")
                 st.rerun()
@@ -193,41 +168,35 @@ def _render_competitor_list_ui():
                     asyncio.run(asyncio.sleep(0.5))
                     st.rerun()
 
+    st.divider()
 
-def _render_subscriber_management_ui():
-    """Renders the subscriber list and management section."""
+    # --- 3. SUBSCRIBERS (UPDATED) ---
     st.header("👥 Subscribers")
     subs = utils.get_subscribers()
-    if subs:
-        st.table(subs)
-    else:
+
+    if not subs:
         st.info("No active subscribers.")
-
-    rem_sub = st.text_input("Remove Subscriber Email")
-    if st.button("Unsubscribe User"):
-        utils.remove_subscriber(rem_sub)
-        st.success("User removed.")
-        st.rerun()
-
-
-def show_admin_dashboard():
-    """Main admin dashboard with competitor and subscriber management."""
-    st.title("🕵️‍♂️ Analyst Admin Dashboard")
-    st.markdown("Manage competitors and subscribers.")
-
-    _render_competitor_discovery_ui()
-    st.divider()
-    _render_competitor_list_ui()
-    st.divider()
-    _render_subscriber_management_ui()
+    else:
+        for sub_email in subs:
+            c1, c2 = st.columns([4, 1])
+            with c1:
+                st.write(sub_email)
+            with c2:
+                # Unique key is essential for buttons in loops
+                if st.button("Remove", key=f"rem_sub_{sub_email}"):
+                    utils.remove_subscriber(sub_email)
+                    st.success(f"Removed {sub_email}")
+                    asyncio.run(asyncio.sleep(0.5))
+                    st.rerun()
 
 
 def main():
     sidebar_selection = st.sidebar.radio("Navigation", ["Subscribe", "Admin Login"])
     if sidebar_selection == "Subscribe":
         show_subscribe_page()
-    elif sidebar_selection == "Admin Login" and check_password():
-        show_admin_dashboard()
+    elif sidebar_selection == "Admin Login":
+        if check_password():
+            show_admin_dashboard()
 
 
 if __name__ == "__main__":
