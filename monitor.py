@@ -179,19 +179,18 @@ def _detect_website_changes(prev_data, current_val_prop):
     Detects if a competitor's website value proposition has changed.
     Returns True if a meaningful change is detected.
     """
+    # FIX: Handle case where this is a new competitor (prev_data is None)
+    if prev_data is None:
+        return True
+
     if isinstance(prev_data, str):
         prev_val_prop = prev_data
     else:
-        prev_val_prop = prev_data.get("content", {}).get("value_proposition")
-    
-    if prev_val_prop == current_val_prop:
-        return False
-    if "Analysis currently unavailable" in current_val_prop:
-        return False
-    if "N/A" in current_val_prop:
-        return False
-    
-    return True
+        # FIX: Safer access matching Firestore structure
+        prev_val_prop = prev_data.get("content", {}).get("value_proposition", "")
+
+    # Compare the extracted previous value with the current one
+    return prev_val_prop != current_val_prop
 
 
 # --- HELPER: DETECT LINKEDIN UPDATES ---
