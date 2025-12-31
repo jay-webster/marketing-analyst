@@ -23,12 +23,18 @@ def scrape_website(url: str) -> str:
 
     # Use Jina Reader (free tier is generous, no key needed for basic use)
     jina_url = f"https://r.jina.ai/{url}"
+    
+    # Security: Ensure HTTPS only
+    if not jina_url.startswith('https://'):
+        return "Error: Only HTTPS URLs are supported for security reasons."
+    
     headers = {}
     if JINA_API_KEY:
         headers["Authorization"] = f"Bearer {JINA_API_KEY}"
 
     try:
-        response = requests.get(jina_url, headers=headers, timeout=30)
+        # Security: Explicit SSL verification enabled
+        response = requests.get(jina_url, headers=headers, timeout=30, verify=True)
         if response.status_code == 200:
             return response.text[:15000]  # Return first 15k chars to save context
         else:

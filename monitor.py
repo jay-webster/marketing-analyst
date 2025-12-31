@@ -17,6 +17,9 @@ load_dotenv()
 REFERENCE_DOMAIN = "navistone.com"
 REFERENCE_NAME = "NaviStone"
 
+# Regex pattern for extracting JSON from text responses
+JSON_PATTERN = r"\{.*\}"
+
 
 # --- HELPER: POST TO SLACK ---
 def post_to_slack(summary_text, pdf_bytes=None, filename=None):
@@ -93,7 +96,7 @@ async def discover_competitors(target_domain):
         print(f"🔎 Agent Discovery Output: {raw_response[:100]}...")
 
         # Robust JSON Parsing
-        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+        json_match = re.search(JSON_PATTERN, raw_response, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group(0))
             return data.get("competitors", [])
@@ -134,7 +137,7 @@ async def analyze_competitor_website(domain):
                 analysis_prompt, [], headless=True
             )
 
-            json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+            json_match = re.search(JSON_PATTERN, raw_response, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
                 if data.get("value_proposition") not in [
@@ -156,7 +159,7 @@ async def analyze_competitor_website(domain):
             f"Return valid JSON with keys: 'name', 'value_proposition', 'solutions', 'industries'."
         )
         raw_response = await agent.run_agent_turn(fallback_prompt, [], headless=True)
-        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+        json_match = re.search(JSON_PATTERN, raw_response, re.DOTALL)
         if json_match:
             return SimpleNamespace(**json.loads(json_match.group(0)))
     except Exception:
@@ -168,6 +171,61 @@ async def analyze_competitor_website(domain):
         solutions="N/A",
         industries="N/A",
     )
+
+
+# --- HELPER: DETECT WEBSITE CHANGES ---
+def _detect_website_changes(prev_data, current_val_prop):
+    """
+    Detects if a competitor's website value proposition has changed.
+    Returns True if a meaningful change is detected.
+    """
+    if isinstance(prev_data, str):
+        prev_val_prop = prev_data
+    else:
+        prev_val_prop = prev_data.get("content", {}).get("value_proposition")
+    
+    if prev_val_prop == current_val_prop:
+        return False
+    if "Analysis currently unavailable" in current_val_prop:
+        return False
+    if "N/A" in current_val_prop:
+        return False
+    
+    return True
+
+
+# --- HELPER: DETECT LINKEDIN UPDATES ---
+def _detect_linkedin_updates(linkedin_result):
+    """
+    Detects if there are meaningful LinkedIn updates.
+    Returns tuple of (summary_text, has_news).
+    """
+    li_summary = (
+        linkedin_result.summary_text
+        if (linkedin_result and len(linkedin_result.summary_text) > 50)
+        else ""
+    )
+    news_found = bool(li_summary and "No recent updates" not in li_summary)
+    return li_summary, news_found
+
+
+# --- HELPER: PREPARE COMPANY DATA ---
+def _prepare_company_data(domain, website_result, li_summary):
+    """
+    Prepares the company data dictionary for storage and reporting.
+    """
+    current_val_prop = getattr(website_result, "value_proposition", "N/A")
+    
+    return {
+        "name": getattr(website_result, "name", domain),
+        "content": {
+            "value_proposition": current_val_prop,
+            "solutions": getattr(website_result, "solutions", "N/A"),
+            "industries": getattr(website_result, "industries", "N/A"),
+        },
+        "linkedin_update": li_summary or "No recent updates.",
+        "last_updated": datetime.now().isoformat(),
+    }
 
 
 # --- MAIN JOB ---
@@ -193,43 +251,20 @@ async def run_daily_brief():
         website_result = await analyze_competitor_website(domain)
         linkedin_result = await check_linkedin_updates(company_name, domain)
 
-        prev_data = memory.get(domain, {})
-        if isinstance(prev_data, str):
-            prev_val_prop = prev_data
-        else:
-            prev_val_prop = prev_data.get("content", {}).get("value_proposition")
-
+        # Detect changes using helper functions
         current_val_prop = getattr(website_result, "value_proposition", "N/A")
+        prev_data = memory.get(domain, {})
+        website_changed = _detect_website_changes(prev_data, current_val_prop)
+        li_summary, news_found = _detect_linkedin_updates(linkedin_result)
 
-        website_changed = False
-        if (
-            (prev_val_prop != current_val_prop)
-            and ("Analysis currently unavailable" not in current_val_prop)
-            and ("N/A" not in current_val_prop)
-        ):
-            website_changed = True
+        # Prepare company data
+        full_company_data = _prepare_company_data(domain, website_result, li_summary)
 
-        li_summary = (
-            linkedin_result.summary_text
-            if (linkedin_result and len(linkedin_result.summary_text) > 50)
-            else ""
-        )
-        news_found = bool(li_summary and "No recent updates" not in li_summary)
-
-        full_company_data = {
-            "name": getattr(website_result, "name", domain),
-            "content": {
-                "value_proposition": current_val_prop,
-                "solutions": getattr(website_result, "solutions", "N/A"),
-                "industries": getattr(website_result, "industries", "N/A"),
-            },
-            "linkedin_update": li_summary or "No recent updates.",
-            "last_updated": datetime.now().isoformat(),
-        }
-
+        # Update memory if data is valid
         if "Analysis currently unavailable" not in current_val_prop:
             memory[domain] = full_company_data
 
+        # Track updates
         if website_changed or news_found:
             full_company_data["has_changes"] = True
             updates_found.append(full_company_data)

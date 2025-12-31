@@ -27,4 +27,4 @@ EXPOSE 8080
 
 # --- DEFAULT COMMAND (The Web App) ---
 # This ensures that standard Cloud Run deployments launch Streamlit.
-CMD streamlit run app.py --server.port=8080 --server.address=0.0.0.0
+CMD ["streamlit", "run", "app.py", "--server.port=8080", "--server.address=0.0.0.0"]
