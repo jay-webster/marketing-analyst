@@ -17,9 +17,6 @@ load_dotenv()
 REFERENCE_DOMAIN = "navistone.com"
 REFERENCE_NAME = "NaviStone"
 
-# Regex pattern for extracting JSON from text responses
-JSON_PATTERN = r"\{.*\}"
-
 
 # --- HELPER: POST TO SLACK ---
 def post_to_slack(summary_text, pdf_bytes=None, filename=None):
@@ -72,31 +69,35 @@ def post_to_slack(summary_text, pdf_bytes=None, filename=None):
         print(f"❌ Slack Error: {e.response['error']}")
 
 
-# --- HELPER: NEW DISCOVERY FUNCTION ---
+# --- UPDATED DISCOVERY FUNCTION ---
 async def discover_competitors(target_domain):
     """
-    Uses the Agent to find top 5 competitors for a given domain.
-    Returns a list of dicts: [{'name':..., 'domain':..., 'reason':...}]
+    Uses a "Profile-First" strategy:
+    1. Scrapes the target to understand what they actually do.
+    2. Searches for competitors based on that business model.
     """
-    print(f"🔭 Starting competitor discovery for {target_domain}...")
+    print(f"🔭 Starting Deep Discovery for {target_domain}...")
 
+    # We construct a prompt that forces the agent to look before it leaps.
     prompt = (
         f"I need to identify the top 5 direct competitors for {target_domain}. "
-        f"Use Google Search to find companies that offer similar products/services and target the same audience.\n"
-        f"For each competitor, provide:\n"
-        f"1. Name\n"
-        f"2. Domain (e.g., competitor.com)\n"
-        f"3. Reason (1 short sentence explaining why they are a competitor).\n\n"
-        f"Return a VALID JSON object with a key 'competitors' containing a list of objects with keys: 'name', 'domain', 'reason'."
+        f"Do NOT guess based on the name.\n\n"
+        f"STEP 1: Use the `scrape_website` tool to analyze {target_domain}. "
+        f"Identify their specific industry, core product, and target audience (e.g., 'AdTech for Linear TV' vs 'Generative AI').\n\n"
+        f"STEP 2: Based ONLY on the business model you found in Step 1, use `Google Search` to find 5 actual competitors. "
+        f"Search for queries like 'Competitors of {target_domain}' AND 'Top companies in [Industry Found]'.\n\n"
+        f"STEP 3: Return a VALID JSON object with a key 'competitors' containing a list of objects. "
+        f"Each object must have: 'name', 'domain', and 'reason' (explaining why they match the specific business model found)."
     )
 
     try:
-        # Run agent (headless=True is fine here)
+        # Run agent (headless=True)
+        # Note: The agent has access to 'scrape_website' and 'google_search' defined in agent.py
         raw_response = await agent.run_agent_turn(prompt, [], headless=True)
-        print(f"🔎 Agent Discovery Output: {raw_response[:100]}...")
+        print(f"🔎 Agent Discovery Output: {raw_response[:200]}...")
 
         # Robust JSON Parsing
-        json_match = re.search(JSON_PATTERN, raw_response, re.DOTALL)
+        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group(0))
             return data.get("competitors", [])
@@ -137,7 +138,7 @@ async def analyze_competitor_website(domain):
                 analysis_prompt, [], headless=True
             )
 
-            json_match = re.search(JSON_PATTERN, raw_response, re.DOTALL)
+            json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
                 if data.get("value_proposition") not in [
@@ -159,7 +160,7 @@ async def analyze_competitor_website(domain):
             f"Return valid JSON with keys: 'name', 'value_proposition', 'solutions', 'industries'."
         )
         raw_response = await agent.run_agent_turn(fallback_prompt, [], headless=True)
-        json_match = re.search(JSON_PATTERN, raw_response, re.DOTALL)
+        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
         if json_match:
             return SimpleNamespace(**json.loads(json_match.group(0)))
     except Exception:
@@ -171,60 +172,6 @@ async def analyze_competitor_website(domain):
         solutions="N/A",
         industries="N/A",
     )
-
-
-# --- HELPER: DETECT WEBSITE CHANGES ---
-def _detect_website_changes(prev_data, current_val_prop):
-    """
-    Detects if a competitor's website value proposition has changed.
-    Returns True if a meaningful change is detected.
-    """
-    # FIX: Handle case where this is a new competitor (prev_data is None)
-    if prev_data is None:
-        return True
-
-    if isinstance(prev_data, str):
-        prev_val_prop = prev_data
-    else:
-        # FIX: Safer access matching Firestore structure
-        prev_val_prop = prev_data.get("content", {}).get("value_proposition", "")
-
-    # Compare the extracted previous value with the current one
-    return prev_val_prop != current_val_prop
-
-
-# --- HELPER: DETECT LINKEDIN UPDATES ---
-def _detect_linkedin_updates(linkedin_result):
-    """
-    Detects if there are meaningful LinkedIn updates.
-    Returns tuple of (summary_text, has_news).
-    """
-    li_summary = (
-        linkedin_result.summary_text
-        if (linkedin_result and len(linkedin_result.summary_text) > 50)
-        else ""
-    )
-    news_found = bool(li_summary and "No recent updates" not in li_summary)
-    return li_summary, news_found
-
-
-# --- HELPER: PREPARE COMPANY DATA ---
-def _prepare_company_data(domain, website_result, li_summary):
-    """
-    Prepares the company data dictionary for storage and reporting.
-    """
-    current_val_prop = getattr(website_result, "value_proposition", "N/A")
-    
-    return {
-        "name": getattr(website_result, "name", domain),
-        "content": {
-            "value_proposition": current_val_prop,
-            "solutions": getattr(website_result, "solutions", "N/A"),
-            "industries": getattr(website_result, "industries", "N/A"),
-        },
-        "linkedin_update": li_summary or "No recent updates.",
-        "last_updated": datetime.now().isoformat(),
-    }
 
 
 # --- MAIN JOB ---
@@ -250,20 +197,43 @@ async def run_daily_brief():
         website_result = await analyze_competitor_website(domain)
         linkedin_result = await check_linkedin_updates(company_name, domain)
 
-        # Detect changes using helper functions
-        current_val_prop = getattr(website_result, "value_proposition", "N/A")
         prev_data = memory.get(domain, {})
-        website_changed = _detect_website_changes(prev_data, current_val_prop)
-        li_summary, news_found = _detect_linkedin_updates(linkedin_result)
+        if isinstance(prev_data, str):
+            prev_val_prop = prev_data
+        else:
+            prev_val_prop = prev_data.get("content", {}).get("value_proposition")
 
-        # Prepare company data
-        full_company_data = _prepare_company_data(domain, website_result, li_summary)
+        current_val_prop = getattr(website_result, "value_proposition", "N/A")
 
-        # Update memory if data is valid
+        website_changed = False
+        if (
+            (prev_val_prop != current_val_prop)
+            and ("Analysis currently unavailable" not in current_val_prop)
+            and ("N/A" not in current_val_prop)
+        ):
+            website_changed = True
+
+        li_summary = (
+            linkedin_result.summary_text
+            if (linkedin_result and len(linkedin_result.summary_text) > 50)
+            else ""
+        )
+        news_found = bool(li_summary and "No recent updates" not in li_summary)
+
+        full_company_data = {
+            "name": getattr(website_result, "name", domain),
+            "content": {
+                "value_proposition": current_val_prop,
+                "solutions": getattr(website_result, "solutions", "N/A"),
+                "industries": getattr(website_result, "industries", "N/A"),
+            },
+            "linkedin_update": li_summary or "No recent updates.",
+            "last_updated": datetime.now().isoformat(),
+        }
+
         if "Analysis currently unavailable" not in current_val_prop:
             memory[domain] = full_company_data
 
-        # Track updates
         if website_changed or news_found:
             full_company_data["has_changes"] = True
             updates_found.append(full_company_data)
