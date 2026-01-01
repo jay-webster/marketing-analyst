@@ -71,38 +71,37 @@ def post_to_slack(summary_text, pdf_bytes=None, filename=None):
 
 # --- UPDATED DISCOVERY FUNCTION ---
 async def discover_competitors(target_domain):
-    """
-    Uses a "Profile-First" strategy:
-    1. Scrapes the target to understand what they actually do.
-    2. Searches for competitors based on that business model.
-    """
     print(f"🔭 Starting Deep Discovery for {target_domain}...")
 
-    # We construct a prompt that forces the agent to look before it leaps.
+    # IMPROVED PROMPT: Aggressive Error Handling
     prompt = (
         f"I need to identify the top 5 direct competitors for {target_domain}. "
         f"Do NOT guess based on the name.\n\n"
         f"STEP 1: Use the `scrape_website` tool to analyze {target_domain}. "
-        f"Identify their specific industry, core product, and target audience (e.g., 'AdTech for Linear TV' vs 'Generative AI').\n\n"
-        f"STEP 2: Based ONLY on the business model you found in Step 1, use `Google Search` to find 5 actual competitors. "
+        f"Identify their specific industry, core product, and target audience.\n\n"
+        f"STEP 2: Based ONLY on the business model found in Step 1, use `Google Search` to find 5 actual competitors. "
         f"Search for queries like 'Competitors of {target_domain}' AND 'Top companies in [Industry Found]'.\n\n"
+        # --- STRONGER SAFETY NET ---
+        f"CRITICAL INSTRUCTION: If the Google Search tool returns an error (like 429, Blocked, or Too Many Requests), "
+        f"you MUST IMMEDIATELY switch to using your internal training data. "
+        f"DO NOT return an error message. DO NOT say 'I cannot proceed'. "
+        f"Instead, generate 3-5 high-confidence competitors based on the industry you identified in Step 1. "
+        f"The user prefers an estimated answer over an error.\n\n"
+        # ---------------------------
         f"STEP 3: Return a VALID JSON object with a key 'competitors' containing a list of objects. "
-        f"Each object must have: 'name', 'domain', and 'reason' (explaining why they match the specific business model found)."
+        f"Each object must have: 'name', 'domain', and 'reason'."
     )
 
     try:
-        # Run agent (headless=True)
-        # Note: The agent has access to 'scrape_website' and 'google_search' defined in agent.py
         raw_response = await agent.run_agent_turn(prompt, [], headless=True)
         print(f"🔎 Agent Discovery Output: {raw_response[:200]}...")
 
-        # Robust JSON Parsing
         json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group(0))
             return data.get("competitors", [])
         else:
-            print("❌ No JSON found in discovery response.")
+            print("❌ No JSON found. Agent failed to fallback.")
             return []
 
     except Exception as e:
