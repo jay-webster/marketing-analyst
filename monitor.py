@@ -126,8 +126,9 @@ async def discover_competitors(target_domain):
 
 
 # --- CORE LOGIC: REFRESH (With Blacklist Support) ---
-async def refresh_competitors(target_domain, target_count=5):
-    print(f"🔄 Refreshing list for {target_domain}...")
+# --- UPDATE THIS FUNCTION IN monitor.py ---
+async def refresh_competitors(target_domain, target_count=5, retry=False):
+    print(f"🔄 Refreshing list for {target_domain} (Retry: {retry})...")
     if not db:
         return []
 
@@ -148,20 +149,48 @@ async def refresh_competitors(target_domain, target_count=5):
     if needed <= 0:
         return existing_competitors
 
-    # TRICK: Always ask for at least 3 to ensure we get results, then slice later.
-    ask_for = max(needed, 3)
+    # If retrying, ask for A LOT (7) to ensure we find something unique
+    ask_for = 7 if retry else max(needed, 3)
 
     print(f"🔍 Need {needed} (Asking for {ask_for}) new competitors...")
 
     current_names = [c["name"] for c in existing_competitors]
-    current_domains = [c["domain"] for c in existing_competitors]
-    dismissed_list = ", ".join(dismissed_domains) if dismissed_domains else "None"
+    # Normalize domains: strip http/www and trailing slashes
+    current_domains_norm = [
+        d.lower()
+        .replace("https://", "")
+        .replace("http://", "")
+        .replace("www.", "")
+        .split("/")[0]
+        for d in [c["domain"] for c in existing_competitors]
+    ]
+    dismissed_norm = [
+        d.lower()
+        .replace("https://", "")
+        .replace("http://", "")
+        .replace("www.", "")
+        .split("/")[0]
+        for d in dismissed_domains
+    ]
+
+    # Banned list for prompt
+    banned_list = ", ".join(current_names)
+
+    # Prompt adjustments for Retry
+    retry_instruction = ""
+    if retry:
+        retry_instruction = (
+            "⚠️ CRITICAL: YOUR PREVIOUS ATTEMPT RETURNED DUPLICATES OR DISMISSED COMPANIES. "
+            "You MUST dig deeper. Do not return the market leaders. "
+            "Find smaller, emerging, or adjacent competitors."
+        )
 
     prompt = (
         f"I need {ask_for} NEW competitors for {target_domain} (Industry: {industry_profile}).\n"
-        f"CURRENT LIST: {', '.join(current_names)}.\n"
-        f"DISMISSED (DO NOT SUGGEST): {dismissed_list}.\n\n"
-        f"STEP 1: Find {ask_for} high-quality alternatives that are NOT in the lists above.\n"
+        f"BANNED COMPANIES (DO NOT RETURN): {banned_list}.\n"
+        f"{retry_instruction}\n\n"
+        f"INSTRUCTION: Find {ask_for} competitors that are NOT in the BANNED list above. "
+        f"If the top competitors are banned, look for niche or regional players.\n"
         f"STEP 2: Return JSON with key 'competitors' containing the new objects."
     )
 
@@ -172,25 +201,31 @@ async def refresh_competitors(target_domain, target_count=5):
         if json_match:
             data = json.loads(json_match.group(0))
             candidates = data.get("competitors", [])
-
             valid_new_additions = []
 
-            # Python Logic: Double-Check the Agent's work
             for cand in candidates:
-                d = cand.get("domain", "")
-                n = cand.get("name", "")
+                raw_domain = cand.get("domain", "").lower()
+                norm_domain = (
+                    raw_domain.replace("https://", "")
+                    .replace("http://", "")
+                    .replace("www.", "")
+                    .split("/")[0]
+                )
 
-                # Check 1: Is it already in the list?
-                if d in current_domains or n in current_names:
+                # Filter Logic
+                if norm_domain in current_domains_norm:
+                    print(f"⚠️ Skipping duplicate: {raw_domain}")
                     continue
-
-                # Check 2: Was it dismissed?
-                if d in dismissed_domains:
+                if norm_domain in dismissed_norm:
+                    print(f"⚠️ Skipping dismissed: {raw_domain}")
+                    continue
+                # Simple check to ensure we aren't adding the target itself
+                if target_domain in raw_domain:
                     continue
 
                 valid_new_additions.append(cand)
 
-            # Slicing: Only take what we need to reach the target
+            # Slicing
             final_additions = valid_new_additions[:needed]
 
             if final_additions:
@@ -201,9 +236,14 @@ async def refresh_competitors(target_domain, target_count=5):
                 print(f"✅ Added {len(final_additions)} competitors.")
                 return full_list
             else:
-                print(
-                    "⚠️ Agent returned candidates, but they were all duplicates or dismissed."
-                )
+                print("⚠️ All candidates were filtered out.")
+                # AUTO-RETRY LOGIC
+                if not retry:
+                    print("🔄 Triggering automatic retry with stricter prompt...")
+                    return await refresh_competitors(
+                        target_domain, target_count, retry=True
+                    )
+
                 return existing_competitors
 
         return existing_competitors
