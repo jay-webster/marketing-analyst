@@ -4,6 +4,7 @@ import os
 import asyncio
 import pandas as pd
 from dotenv import load_dotenv
+import monitor
 
 # ADD THESE: The new helper functions from the Refactor
 from monitor import (
