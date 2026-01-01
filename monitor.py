@@ -10,12 +10,19 @@ from dotenv import load_dotenv
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 from google.cloud import firestore
-from google.cloud.firestore import FieldFilter
 from linkedin_tracker import LinkedInTracker
 
 load_dotenv()
 REFERENCE_DOMAIN = "navistone.com"
 REFERENCE_NAME = "NaviStone"
+CACHE_COLLECTION = "discovery_cache"
+
+# --- HELPER: DATABASE ---
+try:
+    project_id = os.getenv("PROJECT_ID")
+    db = firestore.Client(project=project_id) if project_id else firestore.Client()
+except Exception:
+    db = None
 
 
 # --- HELPER: POST TO SLACK ---
@@ -69,47 +76,146 @@ def post_to_slack(summary_text, pdf_bytes=None, filename=None):
         print(f"❌ Slack Error: {e.response['error']}")
 
 
-# --- UPDATED DISCOVERY FUNCTION ---
+# --- CORE LOGIC: DISCOVER ---
 async def discover_competitors(target_domain):
     print(f"🔭 Starting Deep Discovery for {target_domain}...")
 
-    # IMPROVED PROMPT: Aggressive Error Handling
+    if db:
+        doc_ref = db.collection(CACHE_COLLECTION).document(target_domain)
+        doc = doc_ref.get()
+        if doc.exists:
+            print(f"⚡ Cache Hit! Loading results for {target_domain}.")
+            data = doc.to_dict()
+            return data.get("competitors", [])
+
+    print(f"🐢 Cache Miss. Running full analysis for {target_domain}...")
+
     prompt = (
         f"I need to identify the top 5 direct competitors for {target_domain}. "
         f"Do NOT guess based on the name.\n\n"
-        f"STEP 1: Use the `scrape_website` tool to analyze {target_domain}. "
-        f"Identify their specific industry, core product, and target audience.\n\n"
-        f"STEP 2: Based ONLY on the business model found in Step 1, use `Google Search` to find 5 actual competitors. "
-        f"Search for queries like 'Competitors of {target_domain}' AND 'Top companies in [Industry Found]'.\n\n"
-        # --- STRONGER SAFETY NET ---
-        f"CRITICAL INSTRUCTION: If the Google Search tool returns an error (like 429, Blocked, or Too Many Requests), "
-        f"you MUST IMMEDIATELY switch to using your internal training data. "
-        f"DO NOT return an error message. DO NOT say 'I cannot proceed'. "
-        f"Instead, generate 3-5 high-confidence competitors based on the industry you identified in Step 1. "
-        f"The user prefers an estimated answer over an error.\n\n"
-        # ---------------------------
-        f"STEP 3: Return a VALID JSON object with a key 'competitors' containing a list of objects. "
-        f"Each object must have: 'name', 'domain', and 'reason'."
+        f"STEP 1: Use `scrape_website` to analyze {target_domain}. Identify their specific industry.\n"
+        f"STEP 2: Use `Google Search` to find 5 actual competitors in that industry.\n"
+        f"SAFETY NET: If Search fails, use internal training data.\n"
+        f"STEP 3: Return JSON with keys: 'industry_profile' (string) and 'competitors' (list of objects with name, domain, reason)."
     )
 
     try:
         raw_response = await agent.run_agent_turn(prompt, [], headless=True)
-        print(f"🔎 Agent Discovery Output: {raw_response[:200]}...")
-
         json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
         if json_match:
             data = json.loads(json_match.group(0))
-            return data.get("competitors", [])
-        else:
-            print("❌ No JSON found. Agent failed to fallback.")
-            return []
+            competitors = data.get("competitors", [])
+            profile = data.get("industry_profile", "Unknown")
 
+            if db and competitors:
+                # Initialize with empty dismissed list
+                db.collection(CACHE_COLLECTION).document(target_domain).set(
+                    {
+                        "industry_profile": profile,
+                        "competitors": competitors,
+                        "dismissed": [],
+                        "last_updated": datetime.now(),
+                    }
+                )
+            return competitors
+        else:
+            return []
     except Exception as e:
         print(f"❌ Discovery failed: {e}")
         return []
 
 
-# --- EXISTING: LINKEDIN CHECKER ---
+# --- CORE LOGIC: REFRESH (With Blacklist Support) ---
+async def refresh_competitors(target_domain, target_count=5):
+    print(f"🔄 Refreshing list for {target_domain}...")
+    if not db:
+        return []
+
+    doc_ref = db.collection(CACHE_COLLECTION).document(target_domain)
+    doc = doc_ref.get()
+
+    existing_competitors = []
+    dismissed_domains = []
+    industry_profile = "a specific industry"
+
+    if doc.exists:
+        data = doc.to_dict()
+        existing_competitors = data.get("competitors", [])
+        dismissed_domains = data.get("dismissed", [])
+        industry_profile = data.get("industry_profile", industry_profile)
+
+    needed = target_count - len(existing_competitors)
+    if needed <= 0:
+        return existing_competitors
+
+    print(
+        f"🔍 Need {needed} new competitors. Avoiding {len(dismissed_domains)} dismissed domains."
+    )
+
+    # COMBINE EXCLUSION LIST: Current List + Blacklist
+    current_names = [c["name"] for c in existing_competitors]
+    dismissed_list = ", ".join(dismissed_domains) if dismissed_domains else "None"
+
+    prompt = (
+        f"I need {needed} NEW competitors for {target_domain} (Industry: {industry_profile}).\n"
+        f"CURRENT LIST: {', '.join(current_names)}.\n"
+        f"DISMISSED (DO NOT SUGGEST): {dismissed_list}.\n\n"
+        f"STEP 1: Find {needed} high-quality alternatives that are NOT in the lists above.\n"
+        f"STEP 2: Return JSON with key 'competitors' containing the new objects."
+    )
+
+    try:
+        raw_response = await agent.run_agent_turn(prompt, [], headless=True)
+        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group(0))
+            new_additions = data.get("competitors", [])
+
+            full_list = existing_competitors + new_additions
+            doc_ref.update({"competitors": full_list, "last_updated": datetime.now()})
+            return full_list
+        return existing_competitors
+    except Exception as e:
+        print(f"❌ Refresh failed: {e}")
+        return existing_competitors
+
+
+# --- CORE LOGIC: SURGICAL REMOVE (Blacklist Update) ---
+def remove_competitor_from_cache(target_domain, competitor_domain_to_remove):
+    """
+    Removes a competitor AND adds them to the 'dismissed' blacklist.
+    """
+    if not db:
+        return
+
+    try:
+        doc_ref = db.collection(CACHE_COLLECTION).document(target_domain)
+        doc = doc_ref.get()
+
+        if doc.exists:
+            data = doc.to_dict()
+            current_list = data.get("competitors", [])
+            dismissed_list = data.get("dismissed", [])
+
+            # 1. Remove from active list
+            new_list = [
+                c
+                for c in current_list
+                if c.get("domain") != competitor_domain_to_remove
+            ]
+
+            # 2. Add to Blacklist (avoid duplicates)
+            if competitor_domain_to_remove not in dismissed_list:
+                dismissed_list.append(competitor_domain_to_remove)
+
+            # 3. Update DB
+            doc_ref.update({"competitors": new_list, "dismissed": dismissed_list})
+            print(f"🗑️ Blacklisted {competitor_domain_to_remove} for {target_domain}")
+    except Exception as e:
+        print(f"❌ Error updating cache: {e}")
+
+
+# --- EXISTING HELPERS (Keep these) ---
 async def check_linkedin_updates(company_name, domain):
     print(f"\n--- 🕵️‍♂️ Starting LinkedIn Check for {company_name} ---")
     tracker = LinkedInTracker(agent_module=agent, use_mock=False)
@@ -119,52 +225,36 @@ async def check_linkedin_updates(company_name, domain):
         return None
 
 
-# --- EXISTING: WEBSITE ANALYSIS ---
 async def analyze_competitor_website(domain):
+    # (Same as your previous file - omitted for brevity, but KEEP IT in your file)
+    # ... Use the code from the previous working version for analyze_competitor_website ...
     urls_to_try = [f"https://{domain}", f"https://www.{domain}"]
-
-    # 1. Try Direct Scraping
     for url in urls_to_try:
-        print(f"🕵️‍♂️ Attempting scrape of: {url}")
         try:
             analysis_prompt = (
                 f"Analyze the website {url} using the scrape_website tool. "
-                f"If the scrape returns empty or 'blocked', use your internal knowledge to describe {domain}. "
-                f"Return a JSON object with these EXACT keys: 'name', 'value_proposition', 'solutions', 'industries'. "
-                f"Do NOT return 'N/A' or 'Blocked'. Fill the fields with your best analysis of the company."
+                f"If the scrape returns empty or 'blocked', use your internal knowledge. "
+                f"Return a JSON object with keys: 'name', 'value_proposition', 'solutions', 'industries'. "
             )
             raw_response = await agent.run_agent_turn(
                 analysis_prompt, [], headless=True
             )
-
             json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
-                if data.get("value_proposition") not in [
-                    "N/A",
-                    "BLOCKED",
-                    None,
-                    "Could not access website.",
-                ]:
+                if data.get("value_proposition") not in ["N/A", "BLOCKED", None]:
                     return SimpleNamespace(**data)
-        except Exception as e:
-            print(f"❌ Error scraping {url}: {e}")
+        except Exception:
+            pass
 
-    # 2. Fallback: Pure Inference
-    print(f"⚠️ Scraping failed. Switching to analytical inference for {domain}.")
     try:
-        fallback_prompt = (
-            f"You are a CMO. I need a strategic profile of the company '{domain}'. "
-            f"I cannot access their website right now, so use your internal training data to generate this profile. "
-            f"Return valid JSON with keys: 'name', 'value_proposition', 'solutions', 'industries'."
-        )
+        fallback_prompt = f"Act as CMO. Profile '{domain}'. Return JSON keys: 'name', 'value_proposition', 'solutions', 'industries'."
         raw_response = await agent.run_agent_turn(fallback_prompt, [], headless=True)
         json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
         if json_match:
             return SimpleNamespace(**json.loads(json_match.group(0)))
     except Exception:
         pass
-
     return SimpleNamespace(
         name=domain,
         value_proposition="Analysis currently unavailable.",
@@ -173,109 +263,7 @@ async def analyze_competitor_website(domain):
     )
 
 
-# --- MAIN JOB ---
 async def run_daily_brief():
-    print(f"🚀 Starting Daily Brief: {datetime.now()}")
-    db = firestore.Client(project=os.getenv("PROJECT_ID", "marketing-analyst-prod"))
-
-    comp_docs = db.collection("competitors").stream()
-    competitors = [doc.id for doc in comp_docs]
-    memory = utils.load_memory()
-
-    if not competitors:
-        competitors = ["pebblepost.com", "lob.com"]
-    if REFERENCE_DOMAIN in competitors:
-        competitors.remove(REFERENCE_DOMAIN)
-
-    updates_found = []
-
-    for domain in competitors:
-        print(f"--- Analyzing {domain} ---")
-        company_name = domain.split(".")[0].capitalize()
-
-        website_result = await analyze_competitor_website(domain)
-        linkedin_result = await check_linkedin_updates(company_name, domain)
-
-        prev_data = memory.get(domain, {})
-        if isinstance(prev_data, str):
-            prev_val_prop = prev_data
-        else:
-            prev_val_prop = prev_data.get("content", {}).get("value_proposition")
-
-        current_val_prop = getattr(website_result, "value_proposition", "N/A")
-
-        website_changed = False
-        if (
-            (prev_val_prop != current_val_prop)
-            and ("Analysis currently unavailable" not in current_val_prop)
-            and ("N/A" not in current_val_prop)
-        ):
-            website_changed = True
-
-        li_summary = (
-            linkedin_result.summary_text
-            if (linkedin_result and len(linkedin_result.summary_text) > 50)
-            else ""
-        )
-        news_found = bool(li_summary and "No recent updates" not in li_summary)
-
-        full_company_data = {
-            "name": getattr(website_result, "name", domain),
-            "content": {
-                "value_proposition": current_val_prop,
-                "solutions": getattr(website_result, "solutions", "N/A"),
-                "industries": getattr(website_result, "industries", "N/A"),
-            },
-            "linkedin_update": li_summary or "No recent updates.",
-            "last_updated": datetime.now().isoformat(),
-        }
-
-        if "Analysis currently unavailable" not in current_val_prop:
-            memory[domain] = full_company_data
-
-        if website_changed or news_found:
-            full_company_data["has_changes"] = True
-            updates_found.append(full_company_data)
-            print(f"✅ Update found for {domain}")
-        else:
-            print(f"💤 No updates for {domain}")
-
-        await asyncio.sleep(5)
-
-    utils.save_memory(memory)
-    print("💾 Memory updated.")
-
-    if not updates_found:
-        post_to_slack("No significant updates in the competitive environment today.")
-        return
-
-    all_findings = [
-        f"{c['name']}: {c['content']['value_proposition']}" for c in updates_found
-    ]
-    summary_prompt = f"Act as a CMO. Write a 3-sentence summary of:\n{all_findings}"
-    analyst_summary = await agent.run_agent_turn(summary_prompt, [], headless=False)
-
-    pdf_bytes = utils.create_pdf(
-        updates_found, analyst_summary, reference_company=REFERENCE_NAME
-    )
-    filename = f"Daily_Brief_{datetime.now().strftime('%Y-%m-%d')}.pdf"
-
-    subscribers = (
-        db.collection("subscribers")
-        .where(filter=FieldFilter("status", "==", "active"))
-        .stream()
-    )
-    for doc in subscribers:
-        utils.send_email(
-            f"Daily Brief - {datetime.now().strftime('%Y-%m-%d')}",
-            doc.to_dict()["email"],
-            f"Attached is your report.\n\nSummary:\n{analyst_summary}",
-            pdf_bytes,
-            filename,
-        )
-
-    post_to_slack(f"*Analyst Summary:*\n{analyst_summary}", pdf_bytes, filename)
-
-
-if __name__ == "__main__":
-    asyncio.run(run_daily_brief())
+    # (Same as your previous file - omitted for brevity, but KEEP IT)
+    # ... Use the code from the previous working version ...
+    pass
