@@ -148,33 +148,66 @@ async def refresh_competitors(target_domain, target_count=5):
     if needed <= 0:
         return existing_competitors
 
-    print(
-        f"🔍 Need {needed} new competitors. Avoiding {len(dismissed_domains)} dismissed domains."
-    )
+    # TRICK: Always ask for at least 3 to ensure we get results, then slice later.
+    ask_for = max(needed, 3)
 
-    # COMBINE EXCLUSION LIST: Current List + Blacklist
+    print(f"🔍 Need {needed} (Asking for {ask_for}) new competitors...")
+
     current_names = [c["name"] for c in existing_competitors]
+    current_domains = [c["domain"] for c in existing_competitors]
     dismissed_list = ", ".join(dismissed_domains) if dismissed_domains else "None"
 
     prompt = (
-        f"I need {needed} NEW competitors for {target_domain} (Industry: {industry_profile}).\n"
+        f"I need {ask_for} NEW competitors for {target_domain} (Industry: {industry_profile}).\n"
         f"CURRENT LIST: {', '.join(current_names)}.\n"
         f"DISMISSED (DO NOT SUGGEST): {dismissed_list}.\n\n"
-        f"STEP 1: Find {needed} high-quality alternatives that are NOT in the lists above.\n"
+        f"STEP 1: Find {ask_for} high-quality alternatives that are NOT in the lists above.\n"
         f"STEP 2: Return JSON with key 'competitors' containing the new objects."
     )
 
     try:
         raw_response = await agent.run_agent_turn(prompt, [], headless=True)
         json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+
         if json_match:
             data = json.loads(json_match.group(0))
-            new_additions = data.get("competitors", [])
+            candidates = data.get("competitors", [])
 
-            full_list = existing_competitors + new_additions
-            doc_ref.update({"competitors": full_list, "last_updated": datetime.now()})
-            return full_list
+            valid_new_additions = []
+
+            # Python Logic: Double-Check the Agent's work
+            for cand in candidates:
+                d = cand.get("domain", "")
+                n = cand.get("name", "")
+
+                # Check 1: Is it already in the list?
+                if d in current_domains or n in current_names:
+                    continue
+
+                # Check 2: Was it dismissed?
+                if d in dismissed_domains:
+                    continue
+
+                valid_new_additions.append(cand)
+
+            # Slicing: Only take what we need to reach the target
+            final_additions = valid_new_additions[:needed]
+
+            if final_additions:
+                full_list = existing_competitors + final_additions
+                doc_ref.update(
+                    {"competitors": full_list, "last_updated": datetime.now()}
+                )
+                print(f"✅ Added {len(final_additions)} competitors.")
+                return full_list
+            else:
+                print(
+                    "⚠️ Agent returned candidates, but they were all duplicates or dismissed."
+                )
+                return existing_competitors
+
         return existing_competitors
+
     except Exception as e:
         print(f"❌ Refresh failed: {e}")
         return existing_competitors
