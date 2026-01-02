@@ -63,7 +63,7 @@ def post_update_to_slack(company_name, change_summary, deep_dive_url=None):
         print(f"❌ Slack Error: {e.response['error']}")
 
 
-# --- HELPER: SEND EMAIL ---
+# --- HELPER: SEND EMAIL (Rich HTML) ---
 def send_update_email(company_name, change_summary, deep_dive_url=None):
     if not db:
         return
@@ -89,12 +89,13 @@ def send_update_email(company_name, change_summary, deep_dive_url=None):
         )
 
 
-# --- HELPER: BASELINE REPORT ---
+# --- HELPER: BASELINE REPORT (THE DEEP DOSSIER) ---
 def send_baseline_report(new_subscriber_email):
     print(f"📨 Generating Baseline Report for {new_subscriber_email}...")
     if not db:
         return
-    competitor_data = []
+    competitor_cards = ""
+    count = 0
     try:
         track_docs = db.collection("competitors").stream()
         for doc in track_docs:
@@ -102,30 +103,86 @@ def send_baseline_report(new_subscriber_email):
             domain = doc.id
             if REFERENCE_DOMAIN.lower() in domain.lower():
                 continue
+
+            # Extract Rich Data
             content = data.get("content", {})
             val_prop = content.get("value_proposition", "Pending Analysis...")
-            if len(val_prop) > 200:
-                val_prop = val_prop[:200] + "..."
-            competitor_data.append(
-                {
-                    "name": data.get("name", domain.split(".")[0].capitalize()),
-                    "domain": domain,
-                    "val_prop": val_prop,
-                }
+            news_data = content.get("latest_news", {})
+
+            # Helper to format news sections
+            def format_section(title, items):
+                if not items or items == "N/A":
+                    return ""
+                if isinstance(items, list) and items:
+                    list_html = "".join(
+                        [f"<li style='margin-bottom:4px;'>{i}</li>" for i in items]
+                    )
+                    return f"<div style='margin-top:10px;'><strong style='font-size:12px; color:#555;'>{title}:</strong><ul style='margin:5px 0 0 20px; font-size:13px; color:#444;'>{list_html}</ul></div>"
+                elif isinstance(items, str) and len(items) > 5:
+                    return f"<div style='margin-top:10px;'><strong style='font-size:12px; color:#555;'>{title}:</strong><p style='margin:2px 0 0 0; font-size:13px; color:#444;'>{items}</p></div>"
+                return ""
+
+            news_html = ""
+            news_html += format_section(
+                "🚀 Product Launches", news_data.get("launches")
             )
+            news_html += format_section(
+                "🤝 Partnerships", news_data.get("partnerships")
+            )
+            news_html += format_section(
+                "👔 Executive Moves", news_data.get("leadership")
+            )
+            news_html += format_section("💰 Funding/M&A", news_data.get("funding"))
+
+            # If no specific news found, show generic fallback
+            if not news_html:
+                news_html = "<p style='font-size:13px; color:#888; font-style:italic;'>No major recent announcements detected.</p>"
+
+            # Create a "Strategy Card"
+            competitor_cards += f"""
+            <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin-bottom: 25px; background-color: #ffffff;">
+                <h3 style="margin-top: 0; color: #0044cc; font-size: 18px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
+                    {data.get("name", domain.split('.')[0].capitalize())} 
+                    <a href="https://{domain}" style="font-size: 12px; color: #777; text-decoration: none; font-weight: normal; float: right;">(Visit Website)</a>
+                </h3>
+                
+                <div style="margin-bottom: 15px;">
+                    <strong style="color: #333; font-size: 12px; text-transform: uppercase;">Value Proposition</strong>
+                    <p style="margin-top: 5px; font-size: 14px; line-height: 1.5; color: #333;">{val_prop}</p>
+                </div>
+
+                <div style="background-color: #f8f9fa; padding: 15px; border-radius: 6px;">
+                    <div style="color: #333; font-size: 12px; text-transform: uppercase; font-weight: bold; margin-bottom: 5px;">Recent Developments</div>
+                    {news_html}
+                </div>
+            </div>
+            """
+            count += 1
+
     except Exception as e:
         print(f"❌ Error gathering baseline: {e}")
         return
 
-    if not competitor_data:
+    if count == 0:
         return
-    list_items = ""
-    for comp in competitor_data:
-        list_items += f'<li style="margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 10px;"><strong style="font-size: 16px;">{comp["name"]}</strong> <a href="https://{comp["domain"]}" style="color: #0044cc; text-decoration: none; font-size: 12px;">(Visit)</a><br><span style="color: #555; font-size: 14px; font-style: italic;">{comp["val_prop"]}</span></li>'
 
     html_content = f"""
-    <html><body style="font-family: Arial, sans-serif; color: #333;"><div style="max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;"><div style="background-color: #2c3e50; color: white; padding: 25px;"><h1 style="margin: 0; font-size: 22px;">Welcome to Market Intel</h1><p style="margin: 5px 0 0 0; opacity: 0.8;">Your surveillance feed is active.</p></div><div style="padding: 25px;"><p>We are tracking <strong>{len(competitor_data)} competitors</strong> for you:</p><ul style="padding-left: 20px;">{list_items}</ul></div></div></body></html>
+    <html>
+        <body style="font-family: 'Helvetica Neue', Arial, sans-serif; color: #333; background-color: #f4f4f4; padding: 20px;">
+            <div style="max-width: 700px; margin: 0 auto; background-color: #ffffff; padding: 40px; border-radius: 8px;">
+                <div style="border-bottom: 2px solid #0044cc; padding-bottom: 20px; margin-bottom: 30px;">
+                    <h1 style="margin: 0; font-size: 24px; color: #2c3e50;">Competitive Intelligence Dossier</h1>
+                    <p style="margin: 10px 0 0 0; color: #7f8c8d;">Active Surveillance Report • {datetime.now().strftime('%B %d, %Y')}</p>
+                </div>
+                {competitor_cards}
+                <div style="border-top: 1px solid #eee; padding-top: 20px; text-align: center; color: #aaa; font-size: 12px;">
+                    Generated by Navistone Marketing Analyst Agent
+                </div>
+            </div>
+        </body>
+    </html>
     """
+
     utils.send_email(
         subject="📈 Baseline Report: Active Surveillance Targets",
         recipient_email=new_subscriber_email,
@@ -135,23 +192,22 @@ def send_baseline_report(new_subscriber_email):
     print(f"✅ Baseline report sent to {new_subscriber_email}")
 
 
-# --- CORE LOGIC: DISCOVER (Enhanced Filter) ---
+# --- CORE LOGIC: DISCOVER ---
 async def discover_competitors(target_domain):
+    # (Existing Logic - Abbreviated for brevity, paste your working version here)
+    # Ensure you keep the Fuzzy Filter logic we added in the previous step!
+    # ...
     print(f"🔭 Starting Deep Discovery for {target_domain}...")
 
-    # 1. Fetch ALL actively tracked domains for fuzzy matching
     active_tracked_domains = []
     if db:
         docs = db.collection("competitors").stream()
-        # Clean: "https://www.pebblepost.com" -> "pebblepost"
         active_tracked_domains = [
             d.id.lower().replace("www.", "").split(".")[0] for d in docs
         ]
 
-    # Also add the target itself
     target_clean = target_domain.lower().replace("www.", "").split(".")[0]
     active_tracked_domains.append(target_clean)
-
     banned_str = ", ".join(active_tracked_domains)
 
     prompt = (
@@ -161,10 +217,9 @@ async def discover_competitors(target_domain):
         f"STEP 2: Find 5 NEW competitors.\n"
         f"STEP 3: Return JSON keys: 'industry_profile', 'competitors' (list of {{name, domain, reason}})."
     )
-
+    # ... (Rest of existing discover logic) ...
     try:
         raw_response = await agent.run_agent_turn(prompt, [], headless=True)
-        # Robust Parsing
         data = {}
         json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
         if json_match:
@@ -180,7 +235,6 @@ async def discover_competitors(target_domain):
         candidates = data.get("competitors", [])
 
         for comp in candidates:
-            # Domain Fix
             if not comp.get("domain"):
                 clean_name = comp.get("name", "").replace(" ", "").lower()
                 comp["domain"] = f"{clean_name}.com"
@@ -188,8 +242,6 @@ async def discover_competitors(target_domain):
             raw_domain = comp["domain"].lower()
             clean_check = raw_domain.replace("www.", "").split(".")[0]
 
-            # FUZZY BAN CHECK
-            # If "pebblepost" is in active_tracked, block "pebblepost.com" AND "www.pebblepost.com"
             is_banned = False
             for banned_key in active_tracked_domains:
                 if (
@@ -200,9 +252,7 @@ async def discover_competitors(target_domain):
                     break
 
             if is_banned:
-                print(f"🙈 Skipping tracked competitor: {comp.get('name')}")
                 continue
-
             valid_competitors.append(comp)
 
         if db and valid_competitors:
@@ -221,20 +271,13 @@ async def discover_competitors(target_domain):
         return []
 
 
-# --- CORE LOGIC: REFRESH (Same Fuzzy Logic) ---
+# --- CORE LOGIC: REFRESH ---
 async def refresh_competitors(target_domain, target_count=5, retry_level=0):
-    # (Simplified for brevity - assumes logic mirrors discovery above)
-    # The key fix is ensuring 'banned_list' uses the fuzzy check logic
-    # ...
-    # [Rest of refresh logic is fine, assuming discovery logic handles the heavy lifting of cache population]
-    # For now, let's keep the existing refresh logic but ensure it saves correctly.
-    # The main issue reported was Discovery suggesting duplicates, which the function above fixes.
-    return (
-        []
-    )  # Stub for brevity in this answer, ensure you keep your working refresh logic!
+    # (Placeholder - Keep your existing working version)
+    return []
 
 
-# --- ANALYSIS HELPERS ---
+# --- ANALYSIS HELPERS (UPDATED FOR NEWS) ---
 async def check_linkedin_updates(company_name, domain):
     tracker = LinkedInTracker(agent_module=agent, use_mock=False)
     try:
@@ -244,15 +287,22 @@ async def check_linkedin_updates(company_name, domain):
 
 
 async def analyze_competitor_website(domain):
-    # 1. Try Scrape
     urls = [f"https://{domain}", f"https://www.{domain}"]
     for url in urls:
         try:
-            raw = await agent.run_agent_turn(
-                f"Analyze {url}. Return JSON: name, value_proposition (1 sentence), solutions.",
-                [],
-                headless=True,
+            # UPDATED PROMPT: Requesting Specific News Categories
+            prompt = (
+                f"Deeply analyze {url}. Look for a 'Press', 'News', or 'About Us' section. "
+                f"Return valid JSON with these keys:\n"
+                f"- 'name': Company Name\n"
+                f"- 'value_proposition': 2 sentences on their core strategy.\n"
+                f"- 'latest_news': Object with keys:\n"
+                f"    - 'launches': List of recent product launches (or 'None').\n"
+                f"    - 'partnerships': List of recent partnerships (or 'None').\n"
+                f"    - 'leadership': List of new executive hires (or 'None').\n"
+                f"    - 'funding': Recent funding rounds or acquisitions (or 'None')."
             )
+            raw = await agent.run_agent_turn(prompt, [], headless=True)
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 data = json.loads(match.group(0))
@@ -264,11 +314,10 @@ async def analyze_competitor_website(domain):
         except:
             pass
 
-    # 2. Strong Fallback (Internal Knowledge)
-    print(f"⚠️ Scrape failed for {domain}. Using internal knowledge fallback.")
+    # Fallback
     try:
         raw = await agent.run_agent_turn(
-            f"You are a CMO. Write a 1-sentence value proposition for {domain}. Return JSON: {{'name': '{domain}', 'value_proposition': '...'}}",
+            f"Act as CMO. Profile {domain}. Return JSON: {{'name': '{domain}', 'value_proposition': '...', 'latest_news': {{'launches': [], 'partnerships': [], 'leadership': [], 'funding': []}}}}",
             [],
             headless=True,
         )
@@ -279,11 +328,11 @@ async def analyze_competitor_website(domain):
         pass
 
     return SimpleNamespace(
-        name=domain, value_proposition="Analysis currently unavailable."
+        name=domain, value_proposition="Analysis currently unavailable.", latest_news={}
     )
 
 
-# --- MAIN JOB: RUN DAILY BRIEF (Force Save) ---
+# --- MAIN JOB ---
 async def run_daily_brief():
     print(f"🚀 Starting Daily Surveillance: {datetime.now()}")
     if not db:
@@ -306,8 +355,8 @@ async def run_daily_brief():
         website_result = await analyze_competitor_website(domain)
         linkedin_result = await check_linkedin_updates(company_name, domain)
 
+        # 2. Comparison Logic (Simplified for brevity)
         prev_data = memory.get(domain, {})
-        # Check DB if memory empty
         if not prev_data:
             doc_snap = db.collection("competitors").document(domain).get()
             if doc_snap.exists:
@@ -317,13 +366,11 @@ async def run_daily_brief():
             prev_val_prop = prev_data
         else:
             prev_val_prop = prev_data.get("content", {}).get("value_proposition")
-
         current_val_prop = getattr(website_result, "value_proposition", "N/A")
 
-        # FORCE UPDATE: If previous was "Pending", TREAT AS CHANGE to overwrite it
         website_changed = False
         if "Pending" in str(prev_val_prop) and "unavailable" not in current_val_prop:
-            website_changed = True  # First real analysis complete
+            website_changed = True
         elif prev_val_prop and prev_val_prop != "N/A":
             if (current_val_prop != prev_val_prop) and (
                 "unavailable" not in current_val_prop
@@ -337,11 +384,12 @@ async def run_daily_brief():
         )
         news_found = bool(li_summary and "No recent updates" not in li_summary)
 
-        # 3. ALWAYS SAVE TO DB (Persistence Fix)
+        # 3. SAVE RICH DATA
         full_company_data = {
             "name": getattr(website_result, "name", domain),
             "content": {
                 "value_proposition": current_val_prop,
+                "latest_news": getattr(website_result, "latest_news", {}),  # NEW FIELD
                 "solutions": getattr(website_result, "solutions", "N/A"),
                 "industries": getattr(website_result, "industries", "N/A"),
             },
@@ -349,21 +397,30 @@ async def run_daily_brief():
             "last_updated": datetime.now().isoformat(),
         }
 
-        # Save to Firestore unconditionally to fix "Pending" status
         if "unavailable" not in current_val_prop:
             db.collection("competitors").document(domain).set(
                 full_company_data, merge=True
             )
-            print(f"💾 Saved data for {domain}")
+            print(f"💾 Saved deep data for {domain}")
 
-        # 4. REPORT
         if website_changed or news_found:
-            print(f"🔔 CHANGE DETECTED for {company_name}!")
             updates_detected += 1
-            # ... (Send notifications logic same as before) ...
+            change_context = (
+                f"Update for {company_name}:\n{li_summary}\nWebsite: {current_val_prop}"
+            )
+            analyst_note = await agent.run_agent_turn(
+                f"Summarize update for {company_name} in 2 bullets:", [], headless=False
+            )
+            post_update_to_slack(
+                company_name, analyst_note, deep_dive_url=f"https://{domain}"
+            )
+            send_update_email(
+                company_name, analyst_note, deep_dive_url=f"https://{domain}"
+            )
 
-        await asyncio.sleep(2)  # Faster interval
+        await asyncio.sleep(2)
 
+    utils.save_memory(memory)
     print(f"💾 Surveillance Complete. {updates_detected} updates sent.")
 
 

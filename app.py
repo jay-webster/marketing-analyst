@@ -84,14 +84,19 @@ def reset_search():
     st.session_state["search_input"] = ""
 
 
+def logout_callback():
+    st.session_state["authenticated"] = False
+
+
 # --- PAGE: ADMIN DASHBOARD ---
 def show_admin_dashboard():
+    # --- SIDEBAR LOGOUT ---
     with st.sidebar:
         st.write(f"Logged in as Admin")
         st.divider()
-        if st.button("🚪 Logout", use_container_width=True):
-            st.session_state["authenticated"] = False
-            st.rerun()
+        # USE CALLBACK for robust logout
+        st.button("🚪 Logout", on_click=logout_callback, use_container_width=True)
+
     st.title("🕵️‍♂️ Analyst Command Center")
 
     tab1, tab2, tab3 = st.tabs(
