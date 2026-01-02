@@ -86,6 +86,12 @@ def reset_search():
 
 # --- PAGE: ADMIN DASHBOARD ---
 def show_admin_dashboard():
+    with st.sidebar:
+        st.write(f"Logged in as Admin")
+        st.divider()
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state["authenticated"] = False
+            st.rerun()
     st.title("🕵️‍♂️ Analyst Command Center")
 
     tab1, tab2, tab3 = st.tabs(
@@ -205,8 +211,12 @@ def show_admin_dashboard():
         st.divider()
         st.markdown("### ➕ Manually Add Competitor")
 
-        # clear_on_submit=True is crucial: it clears the text box when you hit Enter,
-        # providing immediate visual feedback that the submission worked.
+        # 1. CHECK FOR PERSISTENT MESSAGE
+        if "manual_success_msg" in st.session_state:
+            st.success(st.session_state["manual_success_msg"])
+            del st.session_state["manual_success_msg"]
+
+        # 2. THE FORM
         with st.form("manual_add_form", clear_on_submit=True):
             col_input, col_btn = st.columns([3, 1])
             with col_input:
@@ -220,11 +230,14 @@ def show_admin_dashboard():
 
             if submitted and manual_domain:
                 if "." not in manual_domain:
-                    st.error("Please enter a valid domain (e.g., example.com)")
+                    st.error("Please enter a valid domain.")
                 else:
                     success = utils.add_competitor_to_db(manual_domain)
                     if success:
-                        st.success(f"✅ Added {manual_domain}")
+                        # SET SESSION STATE BEFORE RERUN
+                        st.session_state["manual_success_msg"] = (
+                            f"✅ Successfully added {manual_domain}"
+                        )
                         st.rerun()
                     else:
                         st.warning("Could not add domain (already exists?).")
