@@ -109,13 +109,102 @@ def send_update_email(company_name, change_summary, deep_dive_url=None):
     for email in recipients:
         utils.send_email(
             subject=f"⚠️ Update: {company_name} Strategy Shift",
-            recipient=email,
-            body=change_summary,
+            recipient_email=email,  # <--- FIXED: changed 'recipient' to 'recipient_email'
+            body_text=change_summary,  # <--- FIXED: changed 'body' to 'body_text' to match utils.py
             attachment_bytes=None,
             filename=None,
             html_body=html_content,
         )
     print(f"📧 Sent email update for {company_name} to {len(recipients)} subscribers.")
+
+
+# --- HELPER: SEND BASELINE REPORT (Welcome Email) ---
+def send_baseline_report(new_subscriber_email):
+    """
+    Generates a full dossier of all currently tracked competitors
+    and sends it to the new subscriber immediately.
+    """
+    print(f"📨 Generating Baseline Report for {new_subscriber_email}...")
+
+    if not db:
+        return
+
+    competitor_data = []
+    try:
+        track_docs = db.collection("competitors").stream()
+        tracked_domains = [d.id for d in track_docs]
+
+        for domain in tracked_domains:
+            cache_doc = db.collection(CACHE_COLLECTION).document(domain).get()
+            if cache_doc.exists:
+                competitor_data.append(
+                    {
+                        "name": domain.split(".")[0].capitalize(),
+                        "domain": domain,
+                        "status": "Tracking Active",
+                    }
+                )
+            else:
+                competitor_data.append(
+                    {
+                        "name": domain.split(".")[0].capitalize(),
+                        "domain": domain,
+                        "status": "Initializing Surveillance",
+                    }
+                )
+    except Exception as e:
+        print(f"❌ Error gathering baseline: {e}")
+        return
+
+    if not competitor_data:
+        print("⚠️ No competitors found for baseline.")
+        return
+
+    list_items = ""
+    for comp in competitor_data:
+        link = f"https://{comp['domain']}"
+        list_items += f"""
+        <li style="margin-bottom: 15px;">
+            <strong style="font-size: 16px;">{comp['name']}</strong> 
+            <a href="{link}" style="color: #0044cc; text-decoration: none; font-size: 12px;">(Visit)</a><br>
+            <span style="color: #555;">Status: {comp['status']}</span>
+        </li>
+        """
+
+    html_content = f"""
+    <html>
+        <body style="font-family: Arial, sans-serif; color: #333;">
+            <div style="max-width: 600px; margin: 0 auto; border: 1px solid #ddd; border-radius: 8px; overflow: hidden;">
+                <div style="background-color: #2c3e50; color: white; padding: 25px;">
+                    <h1 style="margin: 0; font-size: 22px;">Welcome to Market Intel</h1>
+                    <p style="margin: 5px 0 0 0; opacity: 0.8;">Your surveillance feed is active.</p>
+                </div>
+                <div style="padding: 25px;">
+                    <p>Hello,</p>
+                    <p>You have successfully subscribed to the daily competitive intelligence brief. We are currently tracking <strong>{len(competitor_data)} competitors</strong> for you.</p>
+                    
+                    <h3 style="border-bottom: 2px solid #eee; padding-bottom: 10px; margin-top: 30px;">🎯 Active Targets</h3>
+                    <ul style="padding-left: 20px;">
+                        {list_items}
+                    </ul>
+
+                    <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin-top: 30px; font-size: 13px; color: #666;">
+                        <strong>What happens next?</strong><br>
+                        You will receive an alert immediately whenever we detect a change in strategy, pricing, or messaging for any of these companies. If they don't move, you won't hear from us.
+                    </div>
+                </div>
+            </div>
+        </body>
+    </html>
+    """
+
+    utils.send_email(
+        subject="📈 Baseline Report: Active Surveillance Targets",
+        recipient_email=new_subscriber_email,  # <--- FIXED: changed 'recipient' to 'recipient_email'
+        body_text="Your baseline report is attached (HTML).",  # <--- FIXED: changed 'body' to 'body_text'
+        html_body=html_content,
+    )
+    print(f"✅ Baseline report sent to {new_subscriber_email}")
 
 
 # --- CORE LOGIC: DISCOVER (Bulletproof Parsing) ---
