@@ -213,21 +213,31 @@ def show_admin_dashboard():
                         st.rerun()
 
     # --- TABS 2 & 3 ---
+    # --- TAB 2: MANAGE COMPETITORS ---
     with tab2:
         st.subheader("Active Tracking List")
-        col_a, col_b = st.columns([4, 1])
-        with col_b:
-            if st.button("🔄 Run Daily Brief Now"):
-                with st.spinner("Running analysis..."):
-                    asyncio.run(run_daily_brief())
-                    st.success("Brief Sent!")
+
+        # HEADER with Run Button
+        col_header, col_btn = st.columns([3, 1])
+        with col_header:
+            st.info("These companies are monitored daily for strategy changes.")
+        with col_btn:
+            # THIS IS THE MISSING BUTTON
+            if st.button("🔄 Run Daily Brief Now", use_container_width=True):
+                with st.spinner("Analyzing all competitors (this takes time)..."):
+                    asyncio.run(monitor.run_daily_brief())
+                    st.success("✅ Analysis Complete! Check Slack/Email for alerts.")
+
+        # LIST COMPETITORS
         try:
             docs = db.collection("competitors").stream()
             competitors = [doc.id for doc in docs]
+
             if competitors:
                 for domain in competitors:
                     c1, c2 = st.columns([4, 1])
                     with c1:
+                        # Clickable Link
                         link = (
                             domain if domain.startswith("http") else f"https://{domain}"
                         )
@@ -238,7 +248,7 @@ def show_admin_dashboard():
                             st.rerun()
                     st.divider()
             else:
-                st.info("No competitors being tracked.")
+                st.warning("No competitors being tracked yet.")
         except Exception as e:
             st.error(f"Error loading list: {e}")
 

@@ -34,7 +34,6 @@ def post_update_to_slack(company_name, change_summary, deep_dive_url=None):
 
     client = WebClient(token=token)
 
-    # Slack Block Kit Design
     blocks = [
         {
             "type": "header",
@@ -72,7 +71,6 @@ def post_update_to_slack(company_name, change_summary, deep_dive_url=None):
 
 # --- HELPER: SEND EMAIL (Rich HTML) ---
 def send_update_email(company_name, change_summary, deep_dive_url=None):
-    # Retrieve subscribers
     if not db:
         return
     try:
@@ -86,7 +84,6 @@ def send_update_email(company_name, change_summary, deep_dive_url=None):
     if not recipients:
         return
 
-    # HTML Email Template
     html_content = f"""
     <html>
         <body style="font-family: Arial, sans-serif; color: #333;">
@@ -113,34 +110,258 @@ def send_update_email(company_name, change_summary, deep_dive_url=None):
         utils.send_email(
             subject=f"⚠️ Update: {company_name} Strategy Shift",
             recipient=email,
-            body=change_summary,  # Plain text fallback
-            attachment_bytes=None,  # No PDF
+            body=change_summary,
+            attachment_bytes=None,
             filename=None,
-            html_body=html_content,  # New HTML support
+            html_body=html_content,
         )
     print(f"📧 Sent email update for {company_name} to {len(recipients)} subscribers.")
 
 
-# --- CORE LOGIC: REFRESH (Keep your Bulletproof Version) ---
-async def refresh_competitors(target_domain, target_count=5, retry_level=0):
-    # ... (Keep the EXACT refresh_competitors function you just fixed.
-    #      I am omitting it here to save space, but PASTE IT BACK IN from your previous working version!) ...
-    pass
-    # [PASTE YOUR WORKING REFRESH FUNCTION HERE]
-
-
-# --- CORE LOGIC: DISCOVER (Keep Existing) ---
+# --- CORE LOGIC: DISCOVER (Bulletproof Parsing) ---
 async def discover_competitors(target_domain):
-    # ... (Keep existing discover_competitors logic) ...
-    pass
-    # [PASTE YOUR EXISTING DISCOVER FUNCTION HERE]
+    print(f"🔭 Starting Deep Discovery for {target_domain}...")
+
+    if db:
+        doc_ref = db.collection(CACHE_COLLECTION).document(target_domain)
+        doc = doc_ref.get()
+        if doc.exists:
+            print(f"⚡ Cache Hit! Loading results for {target_domain}.")
+            data = doc.to_dict()
+            return data.get("competitors", [])
+
+    print(f"🐢 Cache Miss. Running full analysis for {target_domain}...")
+
+    prompt = (
+        f"I need to identify the top 5 direct competitors for {target_domain}. "
+        f"Do NOT guess based on the name.\n\n"
+        f"STEP 1: Use `scrape_website` to analyze {target_domain}. Identify their specific industry.\n"
+        f"STEP 2: Use `Google Search` to find 5 actual competitors in that industry.\n"
+        f"SAFETY NET: If Search fails, use internal training data.\n"
+        f"STEP 3: Return JSON with keys: 'industry_profile' (string) and 'competitors' (list of objects with name, domain, reason)."
+    )
+
+    try:
+        raw_response = await agent.run_agent_turn(prompt, [], headless=True)
+
+        data = {}
+        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+        if json_match:
+            json_str = json_match.group(0)
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError:
+                print("⚠️ JSON Error in Discovery. Trying Python eval...")
+                try:
+                    data = ast.literal_eval(json_str)
+                except Exception:
+                    print("❌ Discovery parsing failed completely.")
+                    return []
+
+        competitors = data.get("competitors", [])
+        profile = data.get("industry_profile", "Unknown")
+
+        valid_competitors = []
+        for comp in competitors:
+            if "company" in comp and "name" not in comp:
+                comp["name"] = comp["company"]
+
+            if not comp.get("domain"):
+                clean_name = (
+                    comp.get("name", "").replace(" ", "").replace(",", "").lower()
+                )
+                comp["domain"] = f"{clean_name}.com"
+
+            if comp.get("name") != "Unknown":
+                valid_competitors.append(comp)
+
+        if db and valid_competitors:
+            db.collection(CACHE_COLLECTION).document(target_domain).set(
+                {
+                    "industry_profile": profile,
+                    "competitors": valid_competitors,
+                    "dismissed": [],
+                    "last_updated": datetime.now(),
+                }
+            )
+            print(f"✅ Saved {len(valid_competitors)} competitors to cache.")
+            return valid_competitors
+        else:
+            print("⚠️ Discovery finished but found 0 valid competitors.")
+            return []
+
+    except Exception as e:
+        print(f"❌ Discovery failed: {e}")
+        return []
 
 
-# --- CORE LOGIC: SURGICAL REMOVE (Keep Existing) ---
+# --- CORE LOGIC: REFRESH (Bulletproof Parsing & Domain Guessing) ---
+async def refresh_competitors(target_domain, target_count=5, retry_level=0):
+    print(f"🔄 Refreshing list for {target_domain} (Attempt: {retry_level})...")
+    if not db:
+        return []
+
+    doc_ref = db.collection(CACHE_COLLECTION).document(target_domain)
+    doc = doc_ref.get()
+
+    existing_competitors = []
+    dismissed_domains = []
+    industry_profile = "a specific industry"
+
+    if doc.exists:
+        data = doc.to_dict()
+        existing_competitors = data.get("competitors", [])
+        dismissed_domains = data.get("dismissed", [])
+        industry_profile = data.get("industry_profile", industry_profile)
+
+    existing_competitors = [
+        c for c in existing_competitors if c.get("name") != "Unknown"
+    ]
+
+    needed = target_count - len(existing_competitors)
+    if needed <= 0:
+        return existing_competitors
+
+    ask_for = max(needed, 3) + (retry_level * 2)
+
+    current_names = [c["name"] for c in existing_competitors]
+    current_domains_norm = [
+        d.lower()
+        .replace("https://", "")
+        .replace("http://", "")
+        .replace("www.", "")
+        .split("/")[0]
+        for d in [c["domain"] for c in existing_competitors]
+    ]
+    dismissed_norm = [
+        d.lower()
+        .replace("https://", "")
+        .replace("http://", "")
+        .replace("www.", "")
+        .split("/")[0]
+        for d in dismissed_domains
+    ]
+
+    banned_list = ", ".join(current_names)
+
+    instruction_modifier = ""
+    if retry_level > 0:
+        instruction_modifier = "⚠️ PREVIOUS ATTEMPT FAILED. You used single quotes or missing keys. USE VALID JSON with double quotes. Find niche players."
+
+    prompt = (
+        f"I need {ask_for} NEW competitors for {target_domain} (Industry: {industry_profile}).\n"
+        f"ALREADY LISTED (BANNED): {banned_list}.\n"
+        f"{instruction_modifier}\n\n"
+        f"INSTRUCTION: Find {ask_for} companies that are NOT in the BANNED list above.\n"
+        f"You MUST return a JSON object with this EXACT schema:\n"
+        f"{{ 'competitors': [ {{ 'name': 'Company Name', 'domain': 'company.com', 'reason': 'Why they match' }} ] }}\n"
+        f"DO NOT use keys like 'company' or 'description'. YOU MUST FIND THE DOMAIN."
+    )
+
+    try:
+        raw_response = await agent.run_agent_turn(prompt, [], headless=True)
+
+        data = {}
+        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+
+        if json_match:
+            json_str = json_match.group(0)
+            try:
+                data = json.loads(json_str)
+            except json.JSONDecodeError:
+                print("⚠️ JSON Error. Trying Python eval for single quotes...")
+                try:
+                    data = ast.literal_eval(json_str)
+                except Exception:
+                    print("❌ Parsing failed completely.")
+                    data = {}
+
+        candidates = data.get("competitors", [])
+        valid_new_additions = []
+
+        for cand in candidates:
+            if "company" in cand and "name" not in cand:
+                cand["name"] = cand["company"]
+
+            if "domain" not in cand or not cand["domain"]:
+                print(f"⚠️ Guessing domain for {cand.get('name')}")
+                clean_name = (
+                    cand.get("name", "").replace(" ", "").replace(",", "").lower()
+                )
+                cand["domain"] = f"{clean_name}.com"
+
+            raw_domain = cand.get("domain", "").lower()
+
+            if not raw_domain or raw_domain == "unknown":
+                continue
+
+            norm_domain = (
+                raw_domain.replace("https://", "")
+                .replace("http://", "")
+                .replace("www.", "")
+                .split("/")[0]
+            )
+
+            if norm_domain in current_domains_norm:
+                print(f"⚠️ Skipping duplicate: {raw_domain}")
+                continue
+            if norm_domain in dismissed_norm:
+                print(f"⚠️ Skipping dismissed: {raw_domain}")
+                continue
+            if target_domain in raw_domain:
+                continue
+
+            valid_new_additions.append(cand)
+
+        final_additions = valid_new_additions[:needed]
+
+        if final_additions:
+            full_list = existing_competitors + final_additions
+            doc_ref.update({"competitors": full_list, "last_updated": datetime.now()})
+            print(f"✅ Added {len(final_additions)} competitors.")
+            return full_list
+        else:
+            print("⚠️ All candidates were filtered out.")
+            if retry_level < 2:
+                print(f"🔄 Triggering retry level {retry_level + 1}...")
+                return await refresh_competitors(
+                    target_domain, target_count, retry_level=retry_level + 1
+                )
+
+            return existing_competitors
+
+    except Exception as e:
+        print(f"❌ Refresh failed: {e}")
+        return existing_competitors
+
+
+# --- CORE LOGIC: SURGICAL REMOVE ---
 def remove_competitor_from_cache(target_domain, competitor_domain_to_remove):
-    # ... (Keep existing logic) ...
-    pass
-    # [PASTE YOUR EXISTING REMOVE FUNCTION HERE]
+    if not db:
+        return
+
+    try:
+        doc_ref = db.collection(CACHE_COLLECTION).document(target_domain)
+        doc = doc_ref.get()
+
+        if doc.exists:
+            data = doc.to_dict()
+            current_list = data.get("competitors", [])
+            dismissed_list = data.get("dismissed", [])
+
+            new_list = [
+                c
+                for c in current_list
+                if c.get("domain") != competitor_domain_to_remove
+            ]
+
+            if competitor_domain_to_remove not in dismissed_list:
+                dismissed_list.append(competitor_domain_to_remove)
+
+            doc_ref.update({"competitors": new_list, "dismissed": dismissed_list})
+            print(f"🗑️ Blacklisted {competitor_domain_to_remove} for {target_domain}")
+    except Exception as e:
+        print(f"❌ Error updating cache: {e}")
 
 
 # --- ANALYSIS HELPERS ---
@@ -154,9 +375,39 @@ async def check_linkedin_updates(company_name, domain):
 
 
 async def analyze_competitor_website(domain):
-    # ... (Keep existing analyze_competitor_website logic) ...
-    pass
-    # [PASTE YOUR EXISTING ANALYZE FUNCTION HERE]
+    urls_to_try = [f"https://{domain}", f"https://www.{domain}"]
+    for url in urls_to_try:
+        try:
+            analysis_prompt = (
+                f"Analyze the website {url} using the scrape_website tool. "
+                f"If the scrape returns empty or 'blocked', use your internal knowledge. "
+                f"Return a JSON object with keys: 'name', 'value_proposition', 'solutions', 'industries'. "
+            )
+            raw_response = await agent.run_agent_turn(
+                analysis_prompt, [], headless=True
+            )
+            json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group(0))
+                if data.get("value_proposition") not in ["N/A", "BLOCKED", None]:
+                    return SimpleNamespace(**data)
+        except Exception:
+            pass
+
+    try:
+        fallback_prompt = f"Act as CMO. Profile '{domain}'. Return JSON keys: 'name', 'value_proposition', 'solutions', 'industries'."
+        raw_response = await agent.run_agent_turn(fallback_prompt, [], headless=True)
+        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+        if json_match:
+            return SimpleNamespace(**json.loads(json_match.group(0)))
+    except Exception:
+        pass
+    return SimpleNamespace(
+        name=domain,
+        value_proposition="Analysis currently unavailable.",
+        solutions="N/A",
+        industries="N/A",
+    )
 
 
 # --- MAIN JOB: REPORT BY EXCEPTION ---
@@ -193,7 +444,6 @@ async def run_daily_brief():
 
         # Detect Changes
         website_changed = False
-        # Only trigger if previous existed AND current is different AND current is valid
         if prev_val_prop and prev_val_prop != "N/A":
             if (current_val_prop != prev_val_prop) and (
                 "Analysis currently unavailable" not in current_val_prop
@@ -207,7 +457,7 @@ async def run_daily_brief():
         )
         news_found = bool(li_summary and "No recent updates" not in li_summary)
 
-        # 3. Update Memory (Regardless of notification)
+        # 3. Update Memory
         full_company_data = {
             "name": getattr(website_result, "name", domain),
             "content": {
@@ -227,7 +477,6 @@ async def run_daily_brief():
             print(f"🔔 CHANGE DETECTED for {company_name}!")
             updates_detected += 1
 
-            # Generate Specific Summary for this Company
             change_context = ""
             if website_changed:
                 change_context += f"*Website Strategy Shift:*\nOld: {prev_val_prop}\nNew: {current_val_prop}\n\n"
@@ -239,7 +488,6 @@ async def run_daily_brief():
                 summary_prompt, [], headless=False
             )
 
-            # Fire Notifications IMMEDIATELY
             post_update_to_slack(
                 company_name, analyst_note, deep_dive_url=f"https://{domain}"
             )
