@@ -285,9 +285,16 @@ def show_public_page():
         submit = st.form_submit_button("Subscribe to Daily Briefs")
 
         if submit and email:
+            # 1. Domain Validation (Security Gate)
+            if not email.lower().endswith("@navistone.com"):
+                st.error(
+                    "🚫 Access Restricted: You must use a @navistone.com email address."
+                )
+                return
+
             if "@" in email and "." in email:
                 try:
-                    # 1. Add to Database
+                    # 2. Add to Database
                     db.collection("subscribers").add(
                         {
                             "email": email,
@@ -296,7 +303,7 @@ def show_public_page():
                         }
                     )
 
-                    # 2. Send Baseline Report (Welcome Email)
+                    # 3. Send Baseline Report (Welcome Email)
                     with st.spinner("Processing subscription & generating baseline..."):
                         monitor.send_baseline_report(email)
 

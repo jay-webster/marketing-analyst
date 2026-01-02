@@ -24,65 +24,59 @@ try:
 except Exception:
     db = None
 
-
 # --- HELPER: POST TO SLACK (Rich Block Kit) ---
 def post_update_to_slack(company_name, change_summary, deep_dive_url=None):
     token = os.environ.get("SLACK_BOT_TOKEN")
     channel = os.environ.get("SLACK_CHANNEL_ID")
-    if not token or not channel:
-        return
+    if not token or not channel: return
 
     client = WebClient(token=token)
-
+    
     blocks = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
                 "text": f"🚨 Competitor Update: {company_name}",
-                "emoji": True,
-            },
+                "emoji": True
+            }
         },
         {"type": "divider"},
-        {"type": "section", "text": {"type": "mrkdwn", "text": f"{change_summary}"}},
-    ]
-
-    if deep_dive_url:
-        blocks.append(
-            {
-                "type": "context",
-                "elements": [
-                    {
-                        "type": "mrkdwn",
-                        "text": f"🔗 <{deep_dive_url}|Visit Website> | 📅 {datetime.now().strftime('%Y-%m-%d')}",
-                    }
-                ],
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"{change_summary}"
             }
-        )
+        }
+    ]
+    
+    if deep_dive_url:
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"🔗 <{deep_dive_url}|Visit Website> | 📅 {datetime.now().strftime('%Y-%m-%d')}"
+                }
+            ]
+        })
 
     try:
-        client.chat_postMessage(
-            channel=channel, blocks=blocks, text=f"Update detected for {company_name}"
-        )
+        client.chat_postMessage(channel=channel, blocks=blocks, text=f"Update detected for {company_name}")
         print(f"✅ Posted update for {company_name} to Slack.")
     except SlackApiError as e:
         print(f"❌ Slack Error: {e.response['error']}")
 
-
 # --- HELPER: SEND EMAIL (Rich HTML) ---
 def send_update_email(company_name, change_summary, deep_dive_url=None):
-    if not db:
-        return
+    if not db: return
     try:
-        subscribers = (
-            db.collection("subscribers").where("status", "==", "active").stream()
-        )
+        subscribers = db.collection("subscribers").where("status", "==", "active").stream()
         recipients = [doc.to_dict()["email"] for doc in subscribers]
-    except Exception:
-        return
+    except Exception: return
 
-    if not recipients:
-        return
+    if not recipients: return
 
     html_content = f"""
     <html>
@@ -109,49 +103,47 @@ def send_update_email(company_name, change_summary, deep_dive_url=None):
     for email in recipients:
         utils.send_email(
             subject=f"⚠️ Update: {company_name} Strategy Shift",
-            recipient_email=email,  # <--- FIXED: changed 'recipient' to 'recipient_email'
-            body_text=change_summary,  # <--- FIXED: changed 'body' to 'body_text' to match utils.py
+            recipient_email=email,
+            body_text=change_summary,
             attachment_bytes=None,
             filename=None,
-            html_body=html_content,
+            html_body=html_content
         )
     print(f"📧 Sent email update for {company_name} to {len(recipients)} subscribers.")
-
 
 # --- HELPER: SEND BASELINE REPORT (Welcome Email) ---
 def send_baseline_report(new_subscriber_email):
     """
-    Generates a full dossier of all currently tracked competitors
-    and sends it to the new subscriber immediately.
+    Generates a full dossier of all currently tracked competitors 
+    by reading their PROFILES directly from Firestore (persistent storage).
     """
     print(f"📨 Generating Baseline Report for {new_subscriber_email}...")
-
-    if not db:
-        return
+    
+    if not db: return
 
     competitor_data = []
     try:
+        # Get list of active tracked domains AND their stored data
         track_docs = db.collection("competitors").stream()
-        tracked_domains = [d.id for d in track_docs]
+        
+        for doc in track_docs:
+            data = doc.to_dict()
+            domain = doc.id
+            
+            # Extract Rich Data if it exists
+            content = data.get("content", {})
+            val_prop = content.get("value_proposition", "Pending Analysis...")
+            
+            # Truncate Val Prop if too long for a summary
+            if len(val_prop) > 150:
+                val_prop = val_prop[:150] + "..."
 
-        for domain in tracked_domains:
-            cache_doc = db.collection(CACHE_COLLECTION).document(domain).get()
-            if cache_doc.exists:
-                competitor_data.append(
-                    {
-                        "name": domain.split(".")[0].capitalize(),
-                        "domain": domain,
-                        "status": "Tracking Active",
-                    }
-                )
-            else:
-                competitor_data.append(
-                    {
-                        "name": domain.split(".")[0].capitalize(),
-                        "domain": domain,
-                        "status": "Initializing Surveillance",
-                    }
-                )
+            competitor_data.append({
+                "name": data.get("name", domain.split('.')[0].capitalize()),
+                "domain": domain,
+                "val_prop": val_prop
+            })
+
     except Exception as e:
         print(f"❌ Error gathering baseline: {e}")
         return
@@ -160,14 +152,15 @@ def send_baseline_report(new_subscriber_email):
         print("⚠️ No competitors found for baseline.")
         return
 
+    # Build Rich HTML List
     list_items = ""
     for comp in competitor_data:
         link = f"https://{comp['domain']}"
         list_items += f"""
-        <li style="margin-bottom: 15px;">
+        <li style="margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 10px;">
             <strong style="font-size: 16px;">{comp['name']}</strong> 
             <a href="{link}" style="color: #0044cc; text-decoration: none; font-size: 12px;">(Visit)</a><br>
-            <span style="color: #555;">Status: {comp['status']}</span>
+            <span style="color: #555; font-size: 14px; font-style: italic;">{comp['val_prop']}</span>
         </li>
         """
 
@@ -181,16 +174,16 @@ def send_baseline_report(new_subscriber_email):
                 </div>
                 <div style="padding: 25px;">
                     <p>Hello,</p>
-                    <p>You have successfully subscribed to the daily competitive intelligence brief. We are currently tracking <strong>{len(competitor_data)} competitors</strong> for you.</p>
+                    <p>You have successfully subscribed. We are currently tracking <strong>{len(competitor_data)} competitors</strong> for you. Here is your baseline intelligence:</p>
                     
-                    <h3 style="border-bottom: 2px solid #eee; padding-bottom: 10px; margin-top: 30px;">🎯 Active Targets</h3>
+                    <h3 style="border-bottom: 2px solid #2c3e50; padding-bottom: 10px; margin-top: 30px;">🎯 Active Target List</h3>
                     <ul style="padding-left: 20px;">
                         {list_items}
                     </ul>
 
                     <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin-top: 30px; font-size: 13px; color: #666;">
                         <strong>What happens next?</strong><br>
-                        You will receive an alert immediately whenever we detect a change in strategy, pricing, or messaging for any of these companies. If they don't move, you won't hear from us.
+                        You will receive an alert immediately whenever we detect a change in strategy, pricing, or messaging for any of these companies.
                     </div>
                 </div>
             </div>
@@ -200,17 +193,16 @@ def send_baseline_report(new_subscriber_email):
 
     utils.send_email(
         subject="📈 Baseline Report: Active Surveillance Targets",
-        recipient_email=new_subscriber_email,  # <--- FIXED: changed 'recipient' to 'recipient_email'
-        body_text="Your baseline report is attached (HTML).",  # <--- FIXED: changed 'body' to 'body_text'
-        html_body=html_content,
+        recipient_email=new_subscriber_email,
+        body_text="Your baseline report is attached (HTML).",
+        html_body=html_content
     )
     print(f"✅ Baseline report sent to {new_subscriber_email}")
-
 
 # --- CORE LOGIC: DISCOVER (Bulletproof Parsing) ---
 async def discover_competitors(target_domain):
     print(f"🔭 Starting Deep Discovery for {target_domain}...")
-
+    
     if db:
         doc_ref = db.collection(CACHE_COLLECTION).document(target_domain)
         doc = doc_ref.get()
@@ -220,7 +212,7 @@ async def discover_competitors(target_domain):
             return data.get("competitors", [])
 
     print(f"🐢 Cache Miss. Running full analysis for {target_domain}...")
-
+    
     prompt = (
         f"I need to identify the top 5 direct competitors for {target_domain}. "
         f"Do NOT guess based on the name.\n\n"
@@ -232,9 +224,9 @@ async def discover_competitors(target_domain):
 
     try:
         raw_response = await agent.run_agent_turn(prompt, [], headless=True)
-
+        
         data = {}
-        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+        json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
         if json_match:
             json_str = json_match.group(0)
             try:
@@ -249,30 +241,25 @@ async def discover_competitors(target_domain):
 
         competitors = data.get("competitors", [])
         profile = data.get("industry_profile", "Unknown")
-
+        
         valid_competitors = []
         for comp in competitors:
-            if "company" in comp and "name" not in comp:
-                comp["name"] = comp["company"]
-
-            if not comp.get("domain"):
-                clean_name = (
-                    comp.get("name", "").replace(" ", "").replace(",", "").lower()
-                )
-                comp["domain"] = f"{clean_name}.com"
-
-            if comp.get("name") != "Unknown":
+            if 'company' in comp and 'name' not in comp: comp['name'] = comp['company']
+            
+            if not comp.get('domain'):
+                clean_name = comp.get('name', '').replace(' ', '').replace(',', '').lower()
+                comp['domain'] = f"{clean_name}.com"
+            
+            if comp.get('name') != "Unknown":
                 valid_competitors.append(comp)
 
         if db and valid_competitors:
-            db.collection(CACHE_COLLECTION).document(target_domain).set(
-                {
-                    "industry_profile": profile,
-                    "competitors": valid_competitors,
-                    "dismissed": [],
-                    "last_updated": datetime.now(),
-                }
-            )
+            db.collection(CACHE_COLLECTION).document(target_domain).set({
+                "industry_profile": profile,
+                "competitors": valid_competitors,
+                "dismissed": [], 
+                "last_updated": datetime.now()
+            })
             print(f"✅ Saved {len(valid_competitors)} competitors to cache.")
             return valid_competitors
         else:
@@ -283,56 +270,38 @@ async def discover_competitors(target_domain):
         print(f"❌ Discovery failed: {e}")
         return []
 
-
 # --- CORE LOGIC: REFRESH (Bulletproof Parsing & Domain Guessing) ---
 async def refresh_competitors(target_domain, target_count=5, retry_level=0):
     print(f"🔄 Refreshing list for {target_domain} (Attempt: {retry_level})...")
-    if not db:
-        return []
+    if not db: return []
 
     doc_ref = db.collection(CACHE_COLLECTION).document(target_domain)
     doc = doc_ref.get()
-
+    
     existing_competitors = []
     dismissed_domains = []
     industry_profile = "a specific industry"
-
+    
     if doc.exists:
         data = doc.to_dict()
         existing_competitors = data.get("competitors", [])
         dismissed_domains = data.get("dismissed", [])
         industry_profile = data.get("industry_profile", industry_profile)
-
-    existing_competitors = [
-        c for c in existing_competitors if c.get("name") != "Unknown"
-    ]
+    
+    existing_competitors = [c for c in existing_competitors if c.get('name') != 'Unknown']
 
     needed = target_count - len(existing_competitors)
     if needed <= 0:
         return existing_competitors
 
     ask_for = max(needed, 3) + (retry_level * 2)
-
-    current_names = [c["name"] for c in existing_competitors]
-    current_domains_norm = [
-        d.lower()
-        .replace("https://", "")
-        .replace("http://", "")
-        .replace("www.", "")
-        .split("/")[0]
-        for d in [c["domain"] for c in existing_competitors]
-    ]
-    dismissed_norm = [
-        d.lower()
-        .replace("https://", "")
-        .replace("http://", "")
-        .replace("www.", "")
-        .split("/")[0]
-        for d in dismissed_domains
-    ]
-
+    
+    current_names = [c['name'] for c in existing_competitors]
+    current_domains_norm = [d.lower().replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0] for d in [c['domain'] for c in existing_competitors]]
+    dismissed_norm = [d.lower().replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0] for d in dismissed_domains]
+    
     banned_list = ", ".join(current_names)
-
+    
     instruction_modifier = ""
     if retry_level > 0:
         instruction_modifier = "⚠️ PREVIOUS ATTEMPT FAILED. You used single quotes or missing keys. USE VALID JSON with double quotes. Find niche players."
@@ -341,6 +310,7 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
         f"I need {ask_for} NEW competitors for {target_domain} (Industry: {industry_profile}).\n"
         f"ALREADY LISTED (BANNED): {banned_list}.\n"
         f"{instruction_modifier}\n\n"
+        
         f"INSTRUCTION: Find {ask_for} companies that are NOT in the BANNED list above.\n"
         f"You MUST return a JSON object with this EXACT schema:\n"
         f"{{ 'competitors': [ {{ 'name': 'Company Name', 'domain': 'company.com', 'reason': 'Why they match' }} ] }}\n"
@@ -349,10 +319,10 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
 
     try:
         raw_response = await agent.run_agent_turn(prompt, [], headless=True)
-
+        
         data = {}
-        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
-
+        json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+        
         if json_match:
             json_str = json_match.group(0)
             try:
@@ -367,30 +337,23 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
 
         candidates = data.get("competitors", [])
         valid_new_additions = []
-
+        
         for cand in candidates:
-            if "company" in cand and "name" not in cand:
-                cand["name"] = cand["company"]
-
-            if "domain" not in cand or not cand["domain"]:
+            if 'company' in cand and 'name' not in cand:
+                cand['name'] = cand['company']
+            
+            if 'domain' not in cand or not cand['domain']:
                 print(f"⚠️ Guessing domain for {cand.get('name')}")
-                clean_name = (
-                    cand.get("name", "").replace(" ", "").replace(",", "").lower()
-                )
-                cand["domain"] = f"{clean_name}.com"
+                clean_name = cand.get('name', '').replace(' ', '').replace(',', '').lower()
+                cand['domain'] = f"{clean_name}.com"
 
-            raw_domain = cand.get("domain", "").lower()
-
+            raw_domain = cand.get('domain', '').lower()
+            
             if not raw_domain or raw_domain == "unknown":
                 continue
 
-            norm_domain = (
-                raw_domain.replace("https://", "")
-                .replace("http://", "")
-                .replace("www.", "")
-                .split("/")[0]
-            )
-
+            norm_domain = raw_domain.replace('https://', '').replace('http://', '').replace('www.', '').split('/')[0]
+            
             if norm_domain in current_domains_norm:
                 print(f"⚠️ Skipping duplicate: {raw_domain}")
                 continue
@@ -399,59 +362,56 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
                 continue
             if target_domain in raw_domain:
                 continue
-
+                
             valid_new_additions.append(cand)
 
         final_additions = valid_new_additions[:needed]
-
+        
         if final_additions:
             full_list = existing_competitors + final_additions
-            doc_ref.update({"competitors": full_list, "last_updated": datetime.now()})
+            doc_ref.update({
+                "competitors": full_list,
+                "last_updated": datetime.now()
+            })
             print(f"✅ Added {len(final_additions)} competitors.")
             return full_list
         else:
             print("⚠️ All candidates were filtered out.")
             if retry_level < 2:
                 print(f"🔄 Triggering retry level {retry_level + 1}...")
-                return await refresh_competitors(
-                    target_domain, target_count, retry_level=retry_level + 1
-                )
-
+                return await refresh_competitors(target_domain, target_count, retry_level=retry_level + 1)
+            
             return existing_competitors
 
     except Exception as e:
         print(f"❌ Refresh failed: {e}")
         return existing_competitors
 
-
 # --- CORE LOGIC: SURGICAL REMOVE ---
 def remove_competitor_from_cache(target_domain, competitor_domain_to_remove):
-    if not db:
-        return
+    if not db: return
 
     try:
         doc_ref = db.collection(CACHE_COLLECTION).document(target_domain)
         doc = doc_ref.get()
-
+        
         if doc.exists:
             data = doc.to_dict()
             current_list = data.get("competitors", [])
             dismissed_list = data.get("dismissed", [])
-
-            new_list = [
-                c
-                for c in current_list
-                if c.get("domain") != competitor_domain_to_remove
-            ]
-
+            
+            new_list = [c for c in current_list if c.get('domain') != competitor_domain_to_remove]
+            
             if competitor_domain_to_remove not in dismissed_list:
                 dismissed_list.append(competitor_domain_to_remove)
-
-            doc_ref.update({"competitors": new_list, "dismissed": dismissed_list})
+            
+            doc_ref.update({
+                "competitors": new_list,
+                "dismissed": dismissed_list
+            })
             print(f"🗑️ Blacklisted {competitor_domain_to_remove} for {target_domain}")
     except Exception as e:
         print(f"❌ Error updating cache: {e}")
-
 
 # --- ANALYSIS HELPERS ---
 async def check_linkedin_updates(company_name, domain):
@@ -459,9 +419,7 @@ async def check_linkedin_updates(company_name, domain):
     tracker = LinkedInTracker(agent_module=agent, use_mock=False)
     try:
         return await tracker.get_company_updates(company_name, domain)
-    except Exception:
-        return None
-
+    except Exception: return None
 
 async def analyze_competitor_website(domain):
     urls_to_try = [f"https://{domain}", f"https://www.{domain}"]
@@ -472,125 +430,78 @@ async def analyze_competitor_website(domain):
                 f"If the scrape returns empty or 'blocked', use your internal knowledge. "
                 f"Return a JSON object with keys: 'name', 'value_proposition', 'solutions', 'industries'. "
             )
-            raw_response = await agent.run_agent_turn(
-                analysis_prompt, [], headless=True
-            )
-            json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+            raw_response = await agent.run_agent_turn(analysis_prompt, [], headless=True)
+            json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
             if json_match:
                 data = json.loads(json_match.group(0))
                 if data.get("value_proposition") not in ["N/A", "BLOCKED", None]:
                     return SimpleNamespace(**data)
-        except Exception:
-            pass
-
+        except Exception: pass
+    
     try:
         fallback_prompt = f"Act as CMO. Profile '{domain}'. Return JSON keys: 'name', 'value_proposition', 'solutions', 'industries'."
         raw_response = await agent.run_agent_turn(fallback_prompt, [], headless=True)
-        json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
-        if json_match:
-            return SimpleNamespace(**json.loads(json_match.group(0)))
-    except Exception:
-        pass
-    return SimpleNamespace(
-        name=domain,
-        value_proposition="Analysis currently unavailable.",
-        solutions="N/A",
-        industries="N/A",
-    )
-
+        json_match = re.search(r'\{.*\}', raw_response, re.DOTALL)
+        if json_match: return SimpleNamespace(**json.loads(json_match.group(0)))
+    except Exception: pass
+    return SimpleNamespace(name=domain, value_proposition="Analysis currently unavailable.", solutions="N/A", industries="N/A")
 
 # --- MAIN JOB: REPORT BY EXCEPTION ---
 async def run_daily_brief():
     print(f"🚀 Starting Daily Surveillance: {datetime.now()}")
-    if not db:
-        return
+    if not db: return
 
     comp_docs = db.collection("competitors").stream()
     competitors = [doc.id for doc in comp_docs]
     memory = utils.load_memory()
-
-    if REFERENCE_DOMAIN in competitors:
-        competitors.remove(REFERENCE_DOMAIN)
+    
+    if REFERENCE_DOMAIN in competitors: competitors.remove(REFERENCE_DOMAIN)
 
     updates_detected = 0
 
     for domain in competitors:
         print(f"--- Surveillance: {domain} ---")
         company_name = domain.split(".")[0].capitalize()
-
+        
         # 1. Run Analysis
         website_result = await analyze_competitor_website(domain)
         linkedin_result = await check_linkedin_updates(company_name, domain)
 
-        # 2. Compare with Memory
+        # 2. Get Previous Data (Prefer Firestore over local memory if available)
+        # Note: In Cloud Run, local memory is usually empty, so we should rely on what we just fetched or Firestore.
         prev_data = memory.get(domain, {})
-        if isinstance(prev_data, str):
-            prev_val_prop = prev_data
-        else:
-            prev_val_prop = prev_data.get("content", {}).get("value_proposition")
+        if isinstance(prev_data, str): prev_val_prop = prev_data
+        else: prev_val_prop = prev_data.get('content', {}).get('value_proposition')
 
-        current_val_prop = getattr(website_result, "value_proposition", "N/A")
+        # Fallback: Try to get previous state from Firestore if local memory is empty
+        doc_ref = db.collection("competitors").document(domain)
+        if not prev_val_prop:
+            firestore_doc = doc_ref.get()
+            if firestore_doc.exists:
+                prev_val_prop = firestore_doc.to_dict().get('content', {}).get('value_proposition')
 
+        current_val_prop = getattr(website_result, 'value_proposition', 'N/A')
+        
         # Detect Changes
         website_changed = False
-        if prev_val_prop and prev_val_prop != "N/A":
-            if (current_val_prop != prev_val_prop) and (
-                "Analysis currently unavailable" not in current_val_prop
-            ):
+        if (prev_val_prop and prev_val_prop != "N/A"):
+            if (current_val_prop != prev_val_prop) and ("Analysis currently unavailable" not in current_val_prop):
                 website_changed = True
-
-        li_summary = (
-            linkedin_result.summary_text
-            if (linkedin_result and len(linkedin_result.summary_text) > 50)
-            else ""
-        )
+        
+        li_summary = linkedin_result.summary_text if (linkedin_result and len(linkedin_result.summary_text) > 50) else ""
         news_found = bool(li_summary and "No recent updates" not in li_summary)
 
-        # 3. Update Memory
+        # 3. Update Persistence (Firestore + Memory)
         full_company_data = {
-            "name": getattr(website_result, "name", domain),
+            "name": getattr(website_result, 'name', domain),
             "content": {
                 "value_proposition": current_val_prop,
-                "solutions": getattr(website_result, "solutions", "N/A"),
-                "industries": getattr(website_result, "industries", "N/A"),
+                "solutions": getattr(website_result, 'solutions', 'N/A'),
+                "industries": getattr(website_result, 'industries', 'N/A'),
             },
             "linkedin_update": li_summary or "No recent updates.",
-            "last_updated": datetime.now().isoformat(),
+            "last_updated": datetime.now().isoformat()
         }
 
-        if "Analysis currently unavailable" not in current_val_prop:
-            memory[domain] = full_company_data
-
-        # 4. REPORT ON EXCEPTION
-        if website_changed or news_found:
-            print(f"🔔 CHANGE DETECTED for {company_name}!")
-            updates_detected += 1
-
-            change_context = ""
-            if website_changed:
-                change_context += f"*Website Strategy Shift:*\nOld: {prev_val_prop}\nNew: {current_val_prop}\n\n"
-            if news_found:
-                change_context += f"*News/Social Update:*\n{li_summary}"
-
-            summary_prompt = f"Act as a competitive intelligence analyst. Summarize this update for {company_name} in 2 bullet points. Focus on the strategic implication:\n{change_context}"
-            analyst_note = await agent.run_agent_turn(
-                summary_prompt, [], headless=False
-            )
-
-            post_update_to_slack(
-                company_name, analyst_note, deep_dive_url=f"https://{domain}"
-            )
-            send_update_email(
-                company_name, analyst_note, deep_dive_url=f"https://{domain}"
-            )
-        else:
-            print(f"💤 No significant changes for {company_name}.")
-
-        await asyncio.sleep(5)
-
-    utils.save_memory(memory)
-    print(f"💾 Surveillance Complete. {updates_detected} updates sent.")
-
-
-if __name__ == "__main__":
-    asyncio.run(run_daily_brief())
+        if "Analysis currently unavailable" not in
+        
