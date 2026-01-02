@@ -94,8 +94,11 @@ def show_admin_dashboard():
     with st.sidebar:
         st.write(f"Logged in as Admin")
         st.divider()
-        # USE CALLBACK for robust logout
-        st.button("🚪 Logout", on_click=logout_callback, use_container_width=True)
+
+        # NUCLEAR OPTION: Clear everything and rerun
+        if st.button("🚪 Logout", use_container_width=True):
+            st.session_state.clear()  # Wipes auth, messages, everything
+            st.rerun()  # Forces a hard reload
 
     st.title("🕵️‍♂️ Analyst Command Center")
 
