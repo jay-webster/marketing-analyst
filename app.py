@@ -203,16 +203,32 @@ def show_admin_dashboard():
                                 st.rerun()
 
         st.divider()
-        with st.expander("Manually Add Domain (Skip Discovery)"):
-            with st.form("manual_add_form"):
-                manual_domain = st.text_input("Domain to track directly:")
-                if st.form_submit_button("Add Manually"):
-                    if manual_domain:
-                        utils.add_competitor_to_db(manual_domain)
-                        st.success(f"Added {manual_domain}")
-                        st.rerun()
+        st.markdown("### ➕ Manually Add Competitor")
 
-    # --- TABS 2 & 3 ---
+        # clear_on_submit=True is crucial: it clears the text box when you hit Enter,
+        # providing immediate visual feedback that the submission worked.
+        with st.form("manual_add_form", clear_on_submit=True):
+            col_input, col_btn = st.columns([3, 1])
+            with col_input:
+                manual_domain = st.text_input(
+                    "Enter domain (e.g. new-rival.com)", label_visibility="collapsed"
+                )
+            with col_btn:
+                submitted = st.form_submit_button(
+                    "Add Domain", use_container_width=True
+                )
+
+            if submitted and manual_domain:
+                if "." not in manual_domain:
+                    st.error("Please enter a valid domain (e.g., example.com)")
+                else:
+                    success = utils.add_competitor_to_db(manual_domain)
+                    if success:
+                        st.success(f"✅ Added {manual_domain}")
+                        st.rerun()
+                    else:
+                        st.warning("Could not add domain (already exists?).")
+
     # --- TAB 2: MANAGE COMPETITORS ---
     with tab2:
         st.subheader("Active Tracking List")
