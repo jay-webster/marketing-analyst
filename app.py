@@ -278,12 +278,16 @@ def show_admin_dashboard():
 def show_public_page():
     st.title("📊 Market Intelligence Brief")
     st.write("Get daily updates on competitor strategy changes and market shifts.")
+    st.info("Subscribe to receive a Baseline Report immediately.")
+
     with st.form("subscribe_form"):
         email = st.text_input("Enter your work email:")
         submit = st.form_submit_button("Subscribe to Daily Briefs")
+
         if submit and email:
             if "@" in email and "." in email:
                 try:
+                    # 1. Add to Database
                     db.collection("subscribers").add(
                         {
                             "email": email,
@@ -291,11 +295,19 @@ def show_public_page():
                             "joined_at": firestore.SERVER_TIMESTAMP,
                         }
                     )
-                    st.success("✅ You are subscribed!")
-                except Exception:
-                    st.error("Error subscribing.")
+
+                    # 2. Send Baseline Report (Welcome Email)
+                    with st.spinner("Processing subscription & generating baseline..."):
+                        monitor.send_baseline_report(email)
+
+                    st.success(
+                        f"✅ Subscribed! A baseline report has been sent to {email}."
+                    )
+
+                except Exception as e:
+                    st.error(f"Something went wrong: {e}")
             else:
-                st.warning("Invalid email.")
+                st.warning("Please enter a valid email address.")
 
 
 def main():
