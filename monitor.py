@@ -188,7 +188,7 @@ def send_baseline_report(new_subscriber_email):
     print(f"✅ Baseline report sent to {new_subscriber_email}")
 
 
-# --- CORE LOGIC: DISCOVER (FIXED FILTER) ---
+# --- CORE LOGIC: DISCOVER (WITH FALLBACK) ---
 async def discover_competitors(target_domain):
     print(f"🔭 Starting Deep Discovery for {target_domain}...")
 
@@ -203,19 +203,16 @@ async def discover_competitors(target_domain):
     target_clean = target_domain.lower().replace("www.", "").split(".")[0]
     active_tracked_domains.append(target_clean)
 
-    # 2. UNBIASED PROMPT
+    # 2. Attempt 1: Standard Discovery
     prompt = (
         f"I need to identify direct competitors for {target_domain}. "
         f"First, analyze the specific industry and value proposition of {target_domain}. "
         f"Then, identify 10 companies that solve the SAME problem for the SAME customer base.\n\n"
-        f"CRITICAL: Do NOT guess. If Search fails, brainstorm based on industry knowledge.\n"
         f"Return valid JSON with keys: 'industry_profile' (string) and 'competitors' (list of {{name, domain, reason}})."
     )
 
     try:
         raw_response = await agent.run_agent_turn(prompt, [], headless=True)
-        print(f"🤖 RAW AI RESPONSE: {raw_response[:200]}...")  # Debug log
-
         data = {}
         json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
         if json_match:
@@ -227,9 +224,33 @@ async def discover_competitors(target_domain):
                 except:
                     pass
 
-        valid_competitors = []
         candidates = data.get("competitors", [])
 
+        # --- FALLBACK MECHANISM ---
+        if not candidates:
+            print(
+                "⚠️ Primary discovery returned 0 candidates. Triggering Brainstorm Fallback..."
+            )
+            fallback_prompt = (
+                f"I need 5 competitors for {target_domain}. "
+                f"Ignore specific search results if they are failing. "
+                f"Based on your general knowledge of the AdTech/Marketing industry, brainstorm 5 companies "
+                f"that operate in the same sector as {target_domain}. "
+                f"Return JSON with keys: 'industry_profile', 'competitors' (list of {{name, domain, reason}})."
+            )
+            raw_response = await agent.run_agent_turn(
+                fallback_prompt, [], headless=True
+            )
+            json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
+            if json_match:
+                try:
+                    data = json.loads(json_match.group(0))
+                except:
+                    pass
+            candidates = data.get("competitors", [])
+        # --------------------------
+
+        valid_competitors = []
         for comp in candidates:
             if not comp.get("domain"):
                 clean_name = comp.get("name", "").replace(" ", "").lower()
@@ -241,9 +262,7 @@ async def discover_competitors(target_domain):
             # 3. STRICT FILTERING (Fixed "Lob in Global" Bug)
             is_banned = False
             for banned_key in active_tracked_domains:
-                # ONLY ban if the domain stem is identical.
-                # Avoids banning "global" just because "lob" is tracked.
-                if banned_key == candidate_stem:
+                if banned_key == candidate_stem:  # Exact match only
                     is_banned = True
                     break
 
