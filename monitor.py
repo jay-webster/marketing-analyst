@@ -188,10 +188,11 @@ def send_baseline_report(new_subscriber_email):
     print(f"✅ Baseline report sent to {new_subscriber_email}")
 
 
-# --- CORE LOGIC: DISCOVER (HIGH SENSITIVITY) ---
+# --- CORE LOGIC: DISCOVER (UNBIASED FIX) ---
 async def discover_competitors(target_domain):
     print(f"🔭 Starting Deep Discovery for {target_domain}...")
 
+    # 1. Build Filter List (For Python use only)
     active_tracked_domains = []
     if db:
         docs = db.collection("competitors").stream()
@@ -201,14 +202,14 @@ async def discover_competitors(target_domain):
 
     target_clean = target_domain.lower().replace("www.", "").split(".")[0]
     active_tracked_domains.append(target_clean)
-    banned_str = ", ".join(active_tracked_domains)
 
+    # 2. UNBIASED PROMPT: We ask for 10, but DO NOT show the exclusion list to the AI.
+    # This prevents the AI from being biased by your existing portfolio.
     prompt = (
-        f"I need 5 direct competitors for {target_domain}. "
-        f"EXCLUDE: {banned_str}.\n\n"
-        f"CRITICAL: You MUST return a JSON list. "
-        f"If you cannot find perfect matches via Search, use your internal industry knowledge to brainstorm "
-        f"similar companies in the same sector. Do NOT return an empty list.\n\n"
+        f"I need to identify direct competitors for {target_domain}. "
+        f"First, analyze the specific industry and value proposition of {target_domain}. "
+        f"Then, identify 10 companies that solve the SAME problem for the SAME customer base.\n\n"
+        f"CRITICAL: Do NOT guess. If Search fails, brainstorm based on industry knowledge.\n"
         f"Return valid JSON with keys: 'industry_profile' (string) and 'competitors' (list of {{name, domain, reason}})."
     )
 
@@ -236,6 +237,8 @@ async def discover_competitors(target_domain):
 
             raw_domain = comp["domain"].lower()
 
+            # 3. STRICT FILTERING IN PYTHON
+            # We silently remove duplicates/existing tracked companies here.
             is_banned = False
             for banned_key in active_tracked_domains:
                 if banned_key in raw_domain:
@@ -245,19 +248,22 @@ async def discover_competitors(target_domain):
             if not is_banned:
                 valid_competitors.append(comp)
 
-        if db and valid_competitors:
+        # Return top 5 unique ones
+        final_list = valid_competitors[:5]
+
+        if db and final_list:
             db.collection(CACHE_COLLECTION).document(target_domain).set(
                 {
                     "industry_profile": data.get("industry_profile", "Unknown"),
-                    "competitors": valid_competitors,
+                    "competitors": final_list,
                     "dismissed": [],
                     "last_updated": datetime.now(),
                 }
             )
-            print(f"✅ Found {len(valid_competitors)} competitors.")
-            return valid_competitors
+            print(f"✅ Found {len(final_list)} unique competitors.")
+            return final_list
 
-        print("⚠️ Discovery returned 0 results (Brainstorm fallback failed).")
+        print("⚠️ Discovery returned 0 results after filtering.")
         return []
 
     except Exception as e:
@@ -265,7 +271,7 @@ async def discover_competitors(target_domain):
         return []
 
 
-# --- CORE LOGIC: REFRESH (RESTORED LOGIC) ---
+# --- CORE LOGIC: REFRESH ---
 async def refresh_competitors(target_domain, target_count=5, retry_level=0):
     print(f"🔄 Refreshing list for {target_domain} (Attempt: {retry_level})...")
     if not db:
@@ -284,30 +290,26 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
         dismissed_domains = data.get("dismissed", [])
         industry_profile = data.get("industry_profile", industry_profile)
 
-    # 1. FETCH ACTIVELY TRACKED DOMAINS
     active_tracked_domains = []
     active_docs = db.collection("competitors").stream()
     active_tracked_domains = [
         d.id.lower().replace("www.", "").split(".")[0] for d in active_docs
     ]
 
-    # Combine Banned List
-    banned_names = (
-        [c["name"] for c in existing_competitors]
-        + dismissed_domains
-        + active_tracked_domains
-    )
-    banned_list_str = ", ".join(banned_names)
+    # For Refresh, we DO want to show the ban list because we are iterating deep
+    # But we'll keep the list "Fuzzy" to avoid strict bias if possible.
+    # Actually, let's use the same "Blind" strategy for Refresh to be safe:
+    # Ask for *more* new ones, then filter.
 
     needed = target_count - len(existing_competitors)
     if needed <= 0:
         return existing_competitors
 
-    ask_for = max(needed, 3) + (retry_level * 2)
+    ask_for = max(needed, 5) + (retry_level * 3)  # Ask for plenty
 
     prompt = (
         f"Find {ask_for} NEW competitors for {target_domain} (Industry: {industry_profile}).\n"
-        f"STRICTLY EXCLUDE THESE COMPANIES: {banned_list_str}.\n"
+        f"They must be different from: {', '.join([c['name'] for c in existing_competitors])}.\n"
         f"INSTRUCTION: Return JSON with key 'competitors' (list of {{name, domain}})."
     )
 
@@ -334,12 +336,17 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
 
             raw_domain = cand.get("domain", "").lower()
 
-            # Exclusion Check
             is_banned = False
+            # Check against global active list + local dismissed list
             for banned_key in active_tracked_domains + dismissed_domains:
                 if banned_key in raw_domain:
                     is_banned = True
                     break
+
+            # Check against current cache
+            for curr in existing_competitors:
+                if curr.get("domain", "") in raw_domain:
+                    is_banned = True
 
             if not is_banned:
                 valid_new.append(cand)
@@ -361,7 +368,7 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
         return existing_competitors
 
 
-# --- CORE LOGIC: REMOVE (RESTORED) ---
+# --- CORE LOGIC: REMOVE ---
 def remove_competitor_from_cache(target_domain, competitor_domain_to_remove):
     if not db:
         return
