@@ -188,7 +188,7 @@ def send_baseline_report(new_subscriber_email):
     print(f"✅ Baseline report sent to {new_subscriber_email}")
 
 
-# --- CORE LOGIC: DISCOVER (UNBIASED FIX) ---
+# --- CORE LOGIC: DISCOVER (FIXED FILTER) ---
 async def discover_competitors(target_domain):
     print(f"🔭 Starting Deep Discovery for {target_domain}...")
 
@@ -203,8 +203,7 @@ async def discover_competitors(target_domain):
     target_clean = target_domain.lower().replace("www.", "").split(".")[0]
     active_tracked_domains.append(target_clean)
 
-    # 2. UNBIASED PROMPT: We ask for 10, but DO NOT show the exclusion list to the AI.
-    # This prevents the AI from being biased by your existing portfolio.
+    # 2. UNBIASED PROMPT
     prompt = (
         f"I need to identify direct competitors for {target_domain}. "
         f"First, analyze the specific industry and value proposition of {target_domain}. "
@@ -215,6 +214,7 @@ async def discover_competitors(target_domain):
 
     try:
         raw_response = await agent.run_agent_turn(prompt, [], headless=True)
+        print(f"🤖 RAW AI RESPONSE: {raw_response[:200]}...")  # Debug log
 
         data = {}
         json_match = re.search(r"\{.*\}", raw_response, re.DOTALL)
@@ -236,19 +236,20 @@ async def discover_competitors(target_domain):
                 comp["domain"] = f"{clean_name}.com"
 
             raw_domain = comp["domain"].lower()
+            candidate_stem = raw_domain.replace("www.", "").split(".")[0]
 
-            # 3. STRICT FILTERING IN PYTHON
-            # We silently remove duplicates/existing tracked companies here.
+            # 3. STRICT FILTERING (Fixed "Lob in Global" Bug)
             is_banned = False
             for banned_key in active_tracked_domains:
-                if banned_key in raw_domain:
+                # ONLY ban if the domain stem is identical.
+                # Avoids banning "global" just because "lob" is tracked.
+                if banned_key == candidate_stem:
                     is_banned = True
                     break
 
             if not is_banned:
                 valid_competitors.append(comp)
 
-        # Return top 5 unique ones
         final_list = valid_competitors[:5]
 
         if db and final_list:
@@ -263,7 +264,9 @@ async def discover_competitors(target_domain):
             print(f"✅ Found {len(final_list)} unique competitors.")
             return final_list
 
-        print("⚠️ Discovery returned 0 results after filtering.")
+        print(
+            f"⚠️ Discovery returned 0 results. (Candidates found: {len(candidates)}, Valid after filter: {len(valid_competitors)})"
+        )
         return []
 
     except Exception as e:
@@ -296,16 +299,11 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
         d.id.lower().replace("www.", "").split(".")[0] for d in active_docs
     ]
 
-    # For Refresh, we DO want to show the ban list because we are iterating deep
-    # But we'll keep the list "Fuzzy" to avoid strict bias if possible.
-    # Actually, let's use the same "Blind" strategy for Refresh to be safe:
-    # Ask for *more* new ones, then filter.
-
     needed = target_count - len(existing_competitors)
     if needed <= 0:
         return existing_competitors
 
-    ask_for = max(needed, 5) + (retry_level * 3)  # Ask for plenty
+    ask_for = max(needed, 5) + (retry_level * 3)
 
     prompt = (
         f"Find {ask_for} NEW competitors for {target_domain} (Industry: {industry_profile}).\n"
@@ -335,17 +333,26 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
                 cand["domain"] = f"{cand.get('name','').replace(' ','').lower()}.com"
 
             raw_domain = cand.get("domain", "").lower()
+            candidate_stem = raw_domain.replace("www.", "").split(".")[0]
 
             is_banned = False
-            # Check against global active list + local dismissed list
+            # Check against global active list + local dismissed list using STRICT MATCH
             for banned_key in active_tracked_domains + dismissed_domains:
-                if banned_key in raw_domain:
+                banned_stem = (
+                    banned_key.replace("www.", "").split(".")[0]
+                    if "." in banned_key
+                    else banned_key
+                )
+                if banned_stem == candidate_stem:
                     is_banned = True
                     break
 
             # Check against current cache
             for curr in existing_competitors:
-                if curr.get("domain", "") in raw_domain:
+                curr_stem = (
+                    curr.get("domain", "").lower().replace("www.", "").split(".")[0]
+                )
+                if curr_stem == candidate_stem:
                     is_banned = True
 
             if not is_banned:
