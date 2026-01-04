@@ -8,7 +8,7 @@ from googlesearch import search
 load_dotenv()
 
 # --- CONFIGURATION ---
-MODEL_ID = "gemini-2.0-flash-exp"  # Or "gemini-1.5-flash"
+MODEL_ID = "gemini-2.5-flash"  # Or "gemini-1.5-flash"
 JINA_API_KEY = os.getenv("JINA_API_KEY", "")  # Optional, but good for rate limits
 
 # --- TOOLS ---
@@ -23,11 +23,11 @@ def scrape_website(url: str) -> str:
 
     # Use Jina Reader (free tier is generous, no key needed for basic use)
     jina_url = f"https://r.jina.ai/{url}"
-    
+
     # Security: Ensure HTTPS only
-    if not jina_url.startswith('https://'):
+    if not jina_url.startswith("https://"):
         return "Error: Only HTTPS URLs are supported for security reasons."
-    
+
     headers = {}
     if JINA_API_KEY:
         headers["Authorization"] = f"Bearer {JINA_API_KEY}"
