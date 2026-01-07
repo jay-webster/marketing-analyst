@@ -77,7 +77,7 @@ def send_update_email(company_name, change_summary, deep_dive_url=None):
     if not recipients:
         return
 
-    # UPDATED: Cleaner HTML format that handles newlines better
+    # Cleaner HTML format
     formatted_summary = change_summary.replace("\n", "<br>")
 
     html_content = f"""
@@ -202,7 +202,7 @@ def send_baseline_report(new_subscriber_email):
     print(f"✅ Baseline report sent to {new_subscriber_email}")
 
 
-# --- CORE LOGIC: DISCOVER (WITH FALLBACK) ---
+# --- CORE LOGIC: DISCOVER (WITH DIRECT FETCH) ---
 async def discover_competitors(target_domain):
     print(f"🔭 Starting Deep Discovery for {target_domain}...")
 
@@ -217,11 +217,28 @@ async def discover_competitors(target_domain):
     target_clean = target_domain.lower().replace("www.", "").split(".")[0]
     active_tracked_domains.append(target_clean)
 
-    # 2. Attempt 1: Standard Discovery
+    # 2. FETCH TARGET INTELLIGENCE (The "Anti-Hallucination" Fix)
+    try:
+        print(f"   -> Profiling {target_domain} via Search & Scrape...")
+        search_dump = agent.google_search(
+            f"What does {target_domain} do? business model competitors"
+        )
+        scrape_dump = agent.scrape_website(f"https://{target_domain}")
+    except Exception as e:
+        print(f"   -> Profiling warning: {e}")
+        search_dump = "Search failed."
+        scrape_dump = "Scrape failed."
+
+    # 3. CONSTRUCT INTELLIGENT PROMPT
     prompt = (
-        f"I need to identify direct competitors for {target_domain}. "
-        f"First, analyze the specific industry and value proposition of {target_domain}. "
-        f"Then, identify 10 companies that solve the SAME problem for the SAME customer base.\n\n"
+        f"I need to identify 10 direct competitors for {target_domain}.\n"
+        f"First, use the provided intelligence below to build a precise Industry Profile for {target_domain}.\n"
+        f"Then, find companies that solve the SAME problem for the SAME customer base.\n\n"
+        f"--- TARGET INTELLIGENCE ---\n"
+        f"{search_dump}\n\n"
+        f"--- WEBSITE CONTENT ---\n"
+        f"{scrape_dump[:10000]}\n\n"
+        f"--- INSTRUCTIONS ---\n"
         f"Return valid JSON with keys: 'industry_profile' (string) and 'competitors' (list of {{name, domain, reason}})."
     )
 
@@ -247,9 +264,7 @@ async def discover_competitors(target_domain):
             )
             fallback_prompt = (
                 f"I need 5 competitors for {target_domain}. "
-                f"Ignore specific search results if they are failing. "
-                f"Based on your general knowledge of the AdTech/Marketing industry, brainstorm 5 companies "
-                f"that operate in the same sector as {target_domain}. "
+                f"Based on the industry: {data.get('industry_profile', 'Unknown')}, brainstorm 5 companies.\n"
                 f"Return JSON with keys: 'industry_profile', 'competitors' (list of {{name, domain, reason}})."
             )
             raw_response = await agent.run_agent_turn(
