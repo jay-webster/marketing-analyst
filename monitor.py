@@ -77,7 +77,7 @@ def send_update_email(company_name, change_summary, deep_dive_url=None):
     if not recipients:
         return
 
-    # Cleaner HTML format
+    # UPDATED: Cleaner HTML format that handles newlines better
     formatted_summary = change_summary.replace("\n", "<br>")
 
     html_content = f"""
@@ -202,22 +202,31 @@ def send_baseline_report(new_subscriber_email):
     print(f"✅ Baseline report sent to {new_subscriber_email}")
 
 
-# --- CORE LOGIC: DISCOVER (WITH DIRECT FETCH) ---
+# --- CORE LOGIC: DISCOVER (WITH SEED-BASED CONTEXT) ---
 async def discover_competitors(target_domain):
     print(f"🔭 Starting Deep Discovery for {target_domain}...")
 
-    # 1. Build Filter List
+    # 1. FETCH KNOWN COMPETITORS (The "Seed" Data)
     active_tracked_domains = []
+    known_competitors_names = []
+
     if db:
         docs = db.collection("competitors").stream()
-        active_tracked_domains = [
-            d.id.lower().replace("www.", "").split(".")[0] for d in docs
-        ]
+        for doc in docs:
+            # Clean domain for filtering
+            d_clean = doc.id.lower().replace("www.", "").split(".")[0]
+            active_tracked_domains.append(d_clean)
+
+            # Get name for Context Seeding (Exclude the target itself)
+            if target_domain.lower() not in doc.id.lower():
+                data = doc.to_dict()
+                name = data.get("name", d_clean.capitalize())
+                known_competitors_names.append(name)
 
     target_clean = target_domain.lower().replace("www.", "").split(".")[0]
     active_tracked_domains.append(target_clean)
 
-    # 2. FETCH TARGET INTELLIGENCE (The "Anti-Hallucination" Fix)
+    # 2. FETCH TARGET INTELLIGENCE
     try:
         print(f"   -> Profiling {target_domain} via Search & Scrape...")
         search_dump = agent.google_search(
@@ -229,11 +238,25 @@ async def discover_competitors(target_domain):
         search_dump = "Search failed."
         scrape_dump = "Scrape failed."
 
-    # 3. CONSTRUCT INTELLIGENT PROMPT
+    # 3. BUILD SEED CONTEXT
+    seed_context = ""
+    if known_competitors_names:
+        seeds = ", ".join(
+            known_competitors_names[:5]
+        )  # Limit to top 5 to avoid prompt overflow
+        seed_context = (
+            f"\n--- SEED DATA (CRITICAL) ---\n"
+            f"The user is ALREADY tracking these competitors: {seeds}.\n"
+            f"This indicates the user is interested in a SPECIFIC niche (e.g. Programmatic Direct Mail) rather than generic marketing.\n"
+            f"Use these seeds to calibrate your search. If {target_domain} does what {seeds} do, focus on that overlap.\n"
+        )
+
+    # 4. CONSTRUCT INTELLIGENT PROMPT
     prompt = (
         f"I need to identify 10 direct competitors for {target_domain}.\n"
         f"First, use the provided intelligence below to build a precise Industry Profile for {target_domain}.\n"
-        f"Then, find companies that solve the SAME problem for the SAME customer base.\n\n"
+        f"Then, find companies that solve the SAME problem for the SAME customer base.\n"
+        f"{seed_context}\n"
         f"--- TARGET INTELLIGENCE ---\n"
         f"{search_dump}\n\n"
         f"--- WEBSITE CONTENT ---\n"
@@ -277,7 +300,6 @@ async def discover_competitors(target_domain):
                 except:
                     pass
             candidates = data.get("competitors", [])
-        # --------------------------
 
         valid_competitors = []
         for comp in candidates:
@@ -288,10 +310,10 @@ async def discover_competitors(target_domain):
             raw_domain = comp["domain"].lower()
             candidate_stem = raw_domain.replace("www.", "").split(".")[0]
 
-            # 3. STRICT FILTERING
+            # STRICT FILTERING
             is_banned = False
             for banned_key in active_tracked_domains:
-                if banned_key == candidate_stem:  # Exact match only
+                if banned_key == candidate_stem:
                     is_banned = True
                     break
 
@@ -312,9 +334,6 @@ async def discover_competitors(target_domain):
             print(f"✅ Found {len(final_list)} unique competitors.")
             return final_list
 
-        print(
-            f"⚠️ Discovery returned 0 results. (Candidates found: {len(candidates)}, Valid after filter: {len(valid_competitors)})"
-        )
         return []
 
     except Exception as e:
@@ -353,8 +372,18 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
 
     ask_for = max(needed, 5) + (retry_level * 3)
 
+    # UPDATED: Add seed context here too!
+    seeds = ", ".join(
+        [
+            d
+            for d in active_tracked_domains
+            if d not in [c["name"].lower() for c in existing_competitors]
+        ][:5]
+    )
+
     prompt = (
         f"Find {ask_for} NEW competitors for {target_domain} (Industry: {industry_profile}).\n"
+        f"CONTEXT: The user tracks {seeds}. Find companies similar to THESE.\n"
         f"They must be different from: {', '.join([c['name'] for c in existing_competitors])}.\n"
         f"INSTRUCTION: Return JSON with key 'competitors' (list of {{name, domain}})."
     )
@@ -478,7 +507,7 @@ async def analyze_competitor_website(domain):
     except Exception as e:
         scrape_data = f"Scrape Failed: {e}"
 
-    # 3. FEED RAW DATA TO AGENT (Updated: Explicitly asks for URLs)
+    # 3. FEED RAW DATA TO AGENT (Robust Prompt)
     prompt = f"""
     ACT AS A CHIEF MARKETING OFFICER.
     I have collected the following raw intelligence for {domain}.
@@ -618,7 +647,6 @@ async def run_daily_brief():
             if isinstance(news_obj, dict):
                 for category, items in news_obj.items():
                     if items and items != "None" and items != ["None"]:
-                        # Join lists with newlines so the Agent sees them clearly
                         if isinstance(items, list):
                             items = "\n  ".join(items)
                         news_text += f"- {category.capitalize()}: {items}\n"
@@ -631,7 +659,7 @@ async def run_daily_brief():
                 f"RECENT NEWS/PRESS:\n{news_text}"
             )
 
-            # 3. THE PROMPT (Executive Briefing Style + No Chat + Strategic Implication)
+            # 3. THE PROMPT
             prompt_with_context = (
                 f"You are a Strategy Consultant creating an Executive Briefing for {company_name}.\n"
                 f"Use the following data (ignore generic marketing fluff):\n\n"
