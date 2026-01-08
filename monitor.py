@@ -372,7 +372,7 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
 
     ask_for = max(needed, 5) + (retry_level * 3)
 
-    # UPDATED: Add seed context here too!
+    # UPDATED: Add seed context AND fix the "Reason" bug
     seeds = ", ".join(
         [
             d
@@ -383,9 +383,11 @@ async def refresh_competitors(target_domain, target_count=5, retry_level=0):
 
     prompt = (
         f"Find {ask_for} NEW competitors for {target_domain} (Industry: {industry_profile}).\n"
-        f"CONTEXT: The user tracks {seeds}. Find companies similar to THESE.\n"
+        f"CONTEXT: The user is specifically tracking: {seeds}. \n"
+        f"IGNORE generic competitors. Find companies that match the specific business model of the seeds (e.g. Programmatic Direct Mail, Retargeting).\n"
         f"They must be different from: {', '.join([c['name'] for c in existing_competitors])}.\n"
-        f"INSTRUCTION: Return JSON with key 'competitors' (list of {{name, domain}})."
+        f"INSTRUCTION: Return JSON with key 'competitors' (list of {{name, domain, reason}}). "
+        f"The 'reason' must explicitly state how they resemble the seed companies."
     )
 
     try:
